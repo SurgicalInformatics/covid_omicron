@@ -1,0 +1,892 @@
+---
+title: "CO-CIN October 2021 to January 2022"
+author: "ISARIC4C collaborative"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  word_document:
+    reference_docx: template.docx  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r library}
+library(tidyverse)
+library(knitr)
+library(finalfit)
+library(ggplot2)
+library(lubridate)
+library(egg)
+library(zoo)
+library(scales)
+```
+
+```{r}
+library(readr) # loaded with tidyverse anyway
+datadir = "/home/common/covid/cleaned/full/"
+timestamp = "2022-01-21_1245"
+# ccp_data   = read_rds(paste0(datadir, "ccp_data_", timestamp, "_full.rds"))
+# topline    = read_rds(paste0(datadir, "topline_", timestamp, "_full.rds"))
+# surv_data  = read_rds(paste0(datadir, "surv_data_", timestamp, "_full.rds"))
+# treatment  = read_rds(paste0(datadir, "treatment_", timestamp, "_full.rds"))
+oneline    = read_rds(paste0(datadir, "oneline_", timestamp, "_full.rds"))
+steroids = readRDS("steroids.rds")
+trt_antivirals = readRDS("trt_antivirals.rds")
+load(paste0(datadir, "helpers_", timestamp, "_full.rda"))
+source("/home/eharrison/cocin_ccp/02_functions.R")
+```
+
+```{r}
+# Master filters
+oneline = oneline %>% 
+  filter(hostdat > ymd(20200201)) %>% 
+  filter(hostdat < Sys.Date()) %>% 
+  filter(sex != "Not specified")
+```
+
+```{r}
+fct_collapse_yn = function(.f){
+  .f %>% 
+    forcats::fct_relabel(~ gsub("^No.*", "No", .)) %>% 
+    forcats::fct_relabel(~ gsub("^Yes.*", "Yes", .))
+}
+```
+
+```{r}
+# Recode dex to join with any_steroids. 
+oneline = oneline %>% 
+  mutate(across(dexamethasone, ~ fct_collapse_yn(.) %>% 
+                  fct_recode(NULL = "N/K") %>% 
+                  fct_relevel("No")))
+```
+
+
+```{r}
+# Join steroids - external script which is why it is done here. 
+oneline = oneline %>% 
+  left_join(steroids %>% select(subjid, any_steroid)) %>% 
+  left_join(trt_antivirals) %>% 
+  mutate(dex_any = case_when(
+    any_steroid == "Yes" ~ "Yes",
+    dexamethasone == "Yes" ~ "Yes",
+    TRUE ~ "No"
+  ))
+rm(steroids, trt_antivirals)
+```
+
+```{r}
+# tmp
+tmp_names = names(oneline) %>% tibble()
+```
+
+```{r eval=FALSE, include=FALSE}
+# London hospital check block
+oneline = oneline %>% 
+  filter(!place_name %in% c("Whipps Cross University Hospital", 
+                           "Newham General Hospital",
+                           "The Royal London Hospital")
+  )
+```
+
+```{r}
+# Fix and label variables
+oneline = oneline %>% 
+  mutate(
+    imd_quintile = fct_recode(imd_quintile,
+                              "1 - most deprived" = "1",
+                              "5 - least deprived" = "5"
+    ) %>% 
+      ff_label("Index multiple depriation"),
+    
+    ethnicity_4levels = fct_collapse(ethnicity,
+                                     "Other Ethnic Minority" = 
+                                       c("Other", "Arab", "Latin American", "Aboriginal/First Nations", "West Asian")) %>% 
+      fct_relevel("White", "South Asian", "East Asian", "Black", "Other Ethnic Minority"),
+    
+    any_oxygen = as.character(any_oxygen),
+    any_oxygen = case_when(
+      oxygenhf_cmoccur == "YES" ~ "Yes",
+      TRUE ~ any_oxygen
+    ) %>% 
+      factor() %>% 
+      ff_label("   Oxygen use"),
+    sex = fct_drop(sex),
+    any_icu = ff_label(any_icu, "ICU/HDU admission"),
+    any_invasive = ff_label(any_invasive, "Invasive ventilation"),
+    any_noninvasive = ff_label(any_noninvasive, "Noninvasive ventillation")
+  )
+```
+
+```{r eval=FALSE, include=FALSE}
+# Outcome date needs ccp_data to make. 
+ccp_data   = read_rds(paste0(datadir, "ccp_data_", timestamp, "_full.rds"))
+
+dsstdtc_any = ccp_data %>% 
+  filter(is.na(redcap_repeat_instance)) %>% 
+  filter(redcap_event_name == "Discharge/Death (Arm 1: TIER 0)" |
+           redcap_event_name == "Discharge/Death (Arm 2: TIER 1)" |
+           redcap_event_name == "Discharge/Death (Arm 3: TIER 2)"
+  ) %>%
+  select(subjid, redcap_event_name, redcap_repeat_instance, daily_dsstdat, dsstdtc, dsstdtc_v2) %>% 
+  mutate(
+    dsstdtc = case_when(
+      !is.na(dsstdtc_v2) ~ dsstdtc_v2,
+      !is.na(dsstdtc) ~ dsstdtc,
+      !is.na(daily_dsstdat) ~ daily_dsstdat
+    )
+  ) %>% 
+  select(subjid, dsstdtc)
+saveRDS(dsstdtc_any, "dsstdtc_any.rds")
+rm(ccp_data)
+```
+
+```{r}
+# Make outcome variables. 
+dsstdtc_any = readRDS("dsstdtc_any.rds")
+oneline = oneline %>%
+  select(-dsstdtc) %>% 
+  left_join(dsstdtc_any) %>% 
+  
+  mutate(
+    
+    # Make outcome variable
+    mort = case_when(
+      dsterm_v2 == "Death," ~ "Died",
+      dsterm_v2 == "Palliative discharge" ~ "Died",
+      dsterm == "Death" ~ "Died",
+      dsterm == "Palliative discharge" ~ "Died",
+      is.na(dsterm) ~ NA_character_,
+      dsterm == "Unknown" ~ NA_character_,
+      TRUE ~ "Alive"
+    ),
+    
+    # Now make status using mort for CPH models.
+    status = NULL,
+    
+    status = case_when(
+      mort == "Died" ~ 1,
+      mort == "Alive" ~ 0,
+      TRUE ~ NA_real_
+    ),
+    
+    time = (dsstdtc - hostdat) %>% as.numeric(),
+    
+    # Competing risks issues here. 
+    time = case_when(
+      mort == "Alive" ~ 90,
+      TRUE ~ time)
+  )
+
+rm(dsstdtc_any)
+```
+
+```{r}
+# Fix paeds dates
+oneline = oneline %>% 
+  mutate(
+    dsstdtc = if_else(subjid == "RJZ01-1045", ymd(20201201), dsstdtc),
+    dsstdtc = if_else(subjid == "RCB55-1521", ymd(20210924), dsstdtc),
+    dsstdtc = if_else(subjid == "CBS25-0156", ymd(20210723), dsstdtc),
+    dsstdtc = if_else(subjid == "F704H-3006", ymd(20210518), dsstdtc),
+    hostdat = if_else(subjid == "7A1A4-0443", ymd(20210702), hostdat),
+    dsstdtc = if_else(subjid == "7A5B3-1241", ymd(20210225), dsstdtc),
+    hostdat = if_else(subjid == "RJE01-1145", ymd(20201024), hostdat),
+    dsstdtc = if_else(subjid == "RJE01-1669", ymd(20201118), dsstdtc),
+    hostdat = if_else(subjid == "RQ301-0182", ymd(20210111), hostdat),
+    dsstdtc = if_else(subjid == "RC971-3055", ymd(20220107), dsstdtc),
+    hostdat = if_else(subjid == "RR813-10377", ymd(20211005), hostdat),
+    
+    los = (dsstdtc - hostdat) %>%
+      as.numeric("days") %>% 
+      ff_label("Length of stay (days)"),
+  )
+```
+
+```{r}
+# Comorbidities and counts
+oneline = oneline %>% 
+  mutate(
+    across(c(chrincard:malnutrition_mhyn, -diabetes_type_mhyn), 
+           ~ fct_recode(.,
+                        "Yes" = "YES",
+                        "No" = "NO",
+                        "No" = "Unknown") %>% 
+             fct_relevel("No"))
+  ) %>% 
+  mutate(
+    across(c(vulnerable_transplant:vulnerable_preg,
+             chronic_ace_cmoccur:chronic_nsaid_cmoccur,
+             diabetes_type_mhyn),
+           ~ fct_recode(.,
+                        "No" = "N/K",
+                        "No" = "NO") %>% 
+             fct_relevel("No"))
+  ) %>% 
+  mutate(
+    across(c(immno_cmtrt:infect_cmtrt, antiviral_cmyn),
+           ~ fct_recode(.,
+                        "No" = "N/A") %>% 
+             fct_relevel("No"))
+  ) %>% 
+mutate(
+  number_comorbid = select(., chrincard:malnutrition_mhyn, -diabetes_type_mhyn) %>% 
+    {. == "Yes"} %>% 
+    rowSums(na.rm = TRUE) %>% 
+    ff_label("Number of comorbidities"),
+  
+  number_comorbid.factor = case_when(
+    number_comorbid < 1 ~ "0",
+    number_comorbid  < 2 ~ "1", 
+    is.na(number_comorbid ) ~ NA_character_,
+    TRUE ~ "2+") %>% 
+    factor() %>% 
+    ff_label("Number of comorbidities")
+)
+```
+
+
+
+```{r}
+# Symptoms
+oneline = oneline %>% 
+  mutate(across(fever_ceoccur_v2:anosmia_ceoccur_v2,
+                ~ fct_recode(.,
+                             "Yes" = "YES",
+                             "No" = "NO",
+                             "Unknown" = "Unknown"))
+  ) %>% 
+  mutate(
+    number_symptoms = select(., fever_ceoccur_v2:anosmia_ceoccur_v2) %>% 
+      {. == "Yes"} %>% 
+      rowSums(na.rm = TRUE) %>% 
+      ff_label("Number of symptoms"),
+    
+    number_symptoms.factor = case_when(
+      number_symptoms < 1 ~ "0",
+      number_symptoms < 2 ~ "1", 
+      is.na(number_symptoms) ~ NA_character_,
+      TRUE ~ "2+") %>% 
+      factor() %>% 
+      ff_label("Number of symptoms"),
+    
+    any_symptoms = case_when(
+      number_symptoms == 0 ~ "No",
+      number_symptoms > 0 ~ "Yes",
+      asymptomatic == "Asymptomatic" ~ "No",
+      no_symptoms == "YES" ~ "No",
+      no_symptoms_v3 == "YES" ~ "No",
+      adm_no_symp == 1 ~ "No",
+      no_symptoms == "No" ~ "Yes",
+      no_symptoms_v3 == "No" ~ "Yes"
+    ) %>% 
+      ff_label("Any symptoms")
+  )
+```
+
+```{r 4C-mortality}
+isaric_lasso <- function(.data, age, sex, comorbid, rr, spo2, gcs, crp, bun,
+                         output = c("vector", "components", "df_vector", "df_components"),
+                         na_to_zeros = TRUE, all_na_rm = TRUE){
+  .age = enquo(age)
+  .sex = enquo(sex)
+  .comorbid = enquo(comorbid)
+  .rr = enquo(rr)
+  .spo2 = enquo(spo2)
+  .gcs = enquo(gcs)
+  .bun = enquo(bun)
+  .crp = enquo(crp)
+  
+  out = .data %>%
+    dplyr::mutate_at(vars(!! .age, !! .comorbid, !! .rr, !! .spo2, !! .gcs, !! .crp, !! .bun
+    ), as.numeric) %>%
+    dplyr::mutate_at(vars(!! .sex), ~ as.character(.) %>% tolower() %>% trimws()) %>%
+    
+    mutate(
+      isaric_lasso_age = case_when(
+        !! .age < 50 ~ 0,
+        !! .age < 60 ~ 2,
+        !! .age < 70 ~ 4,
+        !! .age < 80 ~ 6,
+        !! .age >= 80 ~ 7,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_sex = case_when(
+        !! .sex == "male" ~ 1, # Changed from 0
+        !! .sex == "female" ~ 0,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_comorbid = case_when(
+        !! .comorbid == 0 ~ 0,
+        !! .comorbid == 1 ~ 1,
+        !! .comorbid >= 2 ~ 2,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_rr = case_when(
+        !! .rr < 20 ~ 0,
+        !! .rr < 30 ~ 1,
+        !! .rr >= 30 ~ 2,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_spo2 = case_when(
+        !! .spo2 < 92 ~ 2,
+        !! .spo2 >= 92 ~ 0,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_gcs = case_when(
+        !! .gcs <  15 ~ 2,
+        !! .gcs == 15 ~ 0,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_bun = case_when(
+        !! .bun < 7 ~ 0,
+        !! .bun <= 14 ~ 1,
+        !! .bun >  14 ~ 3,
+        TRUE ~ NA_real_),
+      
+      isaric_lasso_crp = case_when(
+        !! .crp < 50 ~ 0,
+        !! .crp < 100 ~ 1,
+        !! .crp >=100 ~ 2,
+        TRUE ~ NA_real_)
+    ) %>%
+    mutate(
+      isaric_lasso = rowSums(dplyr::select(., dplyr::starts_with("isaric_lasso_")),
+                             na.rm = na_to_zeros)
+    ) %>%
+    
+    {if(all_na_rm){
+      dplyr::mutate(., isaric_lasso = dplyr::if_else(
+        is.na(isaric_lasso_age) &
+          is.na(isaric_lasso_sex) &
+          is.na(isaric_lasso_comorbid) &
+          is.na(isaric_lasso_rr) &
+          is.na(isaric_lasso_spo2) &
+          is.na(isaric_lasso_gcs) &
+          is.na(isaric_lasso_bun) &
+          is.na(isaric_lasso_crp), NA_real_, isaric_lasso))
+    } else {
+      .
+    }}
+  
+  if(output == "vector"){
+    out %>%
+      pull(isaric_lasso)
+  } else if(output == "components"){
+    out %>%
+      select(starts_with("isaric_lasso"))
+  } else if(output == "df_vector"){
+    out %>%
+      pull(isaric_lasso) %>%
+      bind_cols(.data, isaric_lasso = .)
+  } else if(output == "df_components"){
+    out %>% 
+      select(starts_with("isaric_lasso_")) %>% 
+      bind_cols(.data)
+  }
+}
+```
+
+```{r}
+# Scores
+oneline = oneline %>% 
+  mutate(
+    # For NEWS
+    alt_conscious = ifelse(daily_gcs_vsorres.day1 < 15, "Yes", "No"),
+    hypoxic_target = "no", # This and next line for COPD patients only so not used.
+    o2_rx = "no",
+  ) %>% 
+  
+  news(rr = rr_vsorres, spo2 = oxy_vsorres, o2_rx = o2_rx,
+       hypoxic_target = hypoxic_target, sbp = sysbp_vsorres, hr = hr_vsorres, 
+       temp = temp_vsorres, alt_conscious = alt_conscious, 
+       output = "df_vector",  na_to_zeros = FALSE) %>%
+  
+  qsofa(rr = rr_vsorres, sbp = sysbp_vsorres, gcs = daily_gcs_vsorres.day1,
+        na_to_zeros = FALSE, output = c("df_vector")) %>% 
+  
+  isaric_lasso(age = age, sex = sex,  comorbid = number_comorbid, rr = rr_vsorres,
+               spo2 = oxy_vsorres, gcs = daily_gcs_vsorres.day1, 
+               bun = daily_bun_lborres.day1, crp = daily_crp_lborres.day1,
+               output = c("df_vector"), na_to_zeros = FALSE) %>% 
+  
+  isaric_lasso(age = age, sex = sex,  comorbid = number_comorbid, rr = rr_vsorres,
+               spo2 = oxy_vsorres, gcs = daily_gcs_vsorres.day1, 
+               bun = daily_bun_lborres.day1, crp = daily_crp_lborres.day1,
+               output = c("df_components"), na_to_zeros = FALSE) %>% 
+  rowwise() %>% 
+  mutate(
+    isaric_phys = sum(
+      isaric_lasso_rr, isaric_lasso_spo2, 
+      isaric_lasso_gcs, isaric_lasso_bun, 
+      isaric_lasso_crp)) %>% 
+  ungroup() %>% 
+  mutate(
+    isaric_phys = ff_label(isaric_phys, "4C Mortality (physiological/inflammatory)"),
+    isaric_lasso = ff_label(isaric_lasso, "4C Mortality (total)"),
+    news = ff_label(news, "NEWS"),
+    qsofa = ff_label(qsofa, "qSOFA")
+  )
+```
+
+```{r}
+# Vaccination
+nims = read_csv("~/covid_nims/nims/COCIN_NIMS__20220123.csv") %>% 
+  rename_with(tolower) %>% 
+  filter(date_administered != "None")
+```
+
+```{r}
+vac = oneline %>% 
+  select(subjid, hostdat) %>% 
+  left_join(nims, by = c("subjid" = "external_id")) %>% 
+  mutate(admission_to_vac = (hostdat - ymd(date_administered)) %>% as.numeric(),
+         vac_at_admission = if_else(admission_to_vac > 28, "Yes", "No")) %>% 
+  group_by(subjid) %>% 
+  mutate(vac_n_gr28 = sum(admission_to_vac > 28)) %>% 
+  summarise(subjid = first(subjid),
+            hostdat = first(hostdat), 
+            vac_at_admission = if_else(any(vac_at_admission == "Yes"), "Yes", "No"),
+            vac_n_gr28 = first(vac_n_gr28)) %>% 
+  mutate(vac_at_admission = if_else(is.na(vac_at_admission), "No", vac_at_admission),
+         vac_n_gr28 = if_else(is.na(vac_n_gr28), 0L, vac_n_gr28),
+         vac_n_gr28_factor = factor(vac_n_gr28) %>% 
+           fct_recode(
+             "3+" = "3",
+             "3+" = "4"
+           )) %>% 
+  select(-hostdat)
+
+oneline = oneline %>% 
+  left_join(vac) %>% 
+  mutate(
+    vac_at_admission = ff_label(vac_at_admission, "Vaccination >28 days prior to admission"),
+    vac_n_gr28 = ff_label(vac_n_gr28, "Number of vaccinations >28 days prior to admission"),
+    vac_n_gr28_factor = ff_label(vac_n_gr28_factor, "Number of vaccinations >28 days prior to admission")
+  )
+```
+
+```{r}
+# Isoweek
+isoweek_lookup = tibble(date = seq(ymd(20200101), ymd(20220601), by = 1)) %>% 
+  mutate(isoweek = lubridate::isoweek(date))
+
+isoweek_lookup = isoweek_lookup %>% 
+  left_join(isoweek_lookup %>% 
+  group_by(isoweek) %>% 
+  slice(1) %>% 
+  select(isoweek_date = date, isoweek)
+  )
+```
+
+```{r}
+# Time blocks
+oneline = oneline %>% 
+  left_join(isoweek_lookup, by = c("hostdat" = "date")) %>% 
+  mutate(epoch = case_when(
+         hostdat < ymd(20200901) ~ "Jan 2020 - Aug 2020",
+         hostdat < ymd(20210501) ~ "Sept 2020 - April 2021",
+         hostdat < ymd(20211214) ~ "May 2021 - 13 Dec 2021",
+         TRUE ~ "14 Dec 2021 - 21 Jan 2022") %>% 
+           fct_relevel("Jan 2020 - Aug 2020", "Sept 2020 - April 2021",  "May 2021 - 13 Dec 2021", "14 Dec 2021 - 21 Jan 2022")
+  )
+```
+
+```{r}
+fct_case_when <- function(...) {
+  args <- as.list(match.call())
+  levels <- sapply(args[-1], function(f) f[[3]])  # extract RHS of formula
+  levels <- levels[!is.na(levels)]
+  factor(dplyr::case_when(...), levels=levels)
+}
+
+
+oneline %>% 
+  mutate(
+    onset2admission.factor = fct_case_when(
+      any_symptoms == "No" ~ "No symptoms",
+      onset2admission <= -14 ~ "14 days after",
+      onset2admission <= -7 ~ "7 days after",
+      onset2admission == 0 ~ "0 days prior",
+      onset2admission == 1 ~ "1 days prior",
+      onset2admission == 2 ~ "2 days prior",
+      onset2admission == 3 ~ "3 days prior",
+      onset2admission == 4 ~ "4 days prior",
+      onset2admission == 5 ~ "5 days prior",
+      onset2admission == 6 ~ "6 days prior",
+      onset2admission == 7 ~ "7 days prior",
+      onset2admission == 10 ~ "10 days prior",
+      onset2admission == 14 ~ "14 days prior",
+      onset2admission > 14 ~ ">14 days prior"
+    ) %>% 
+      ff_label("Symptom onset to admission/study entry")
+    ) %>% 
+  summary_factorlist("epoch", c("any_symptoms", "onset2admission", "onset2admission.factor"), 
+                     add_dependent_label = TRUE,
+                     add_col_totals = TRUE, total_col = TRUE, na_include = TRUE) %>% 
+  mytable()
+```
+
+# Filters
+
+```{r echo=TRUE}
+oneline = oneline %>% 
+  filter(age >= 18) %>% 
+  filter(any_symptoms == "Yes")
+```
+
+
+# Results
+
+```{r}
+oneline %>% 
+  summary_factorlist("epoch", c("age.factor", "sex", "imd_quintile", "ethnicity_4levels",
+                                "number_comorbid", "number_comorbid.factor", 
+                                "number_symptoms", "number_symptoms.factor",
+                                "isaric_lasso", "isaric_phys", "news", "qsofa"), 
+                     add_dependent_label = TRUE,
+                     add_col_totals = TRUE, total_col = TRUE) %>% 
+  mytable()
+```
+
+
+
+```{r}
+oneline %>% 
+  summary_factorlist("epoch", c("chrincard",
+                                "hypertension_mhyn",
+                                "chronicpul_mhyn",
+                                "asthma_mhyn",
+                                "renal_mhyn",
+                                "modliv",
+                                "mildliver",
+                                "chronicneu_mhyn",
+                                "malignantneo_mhyn",
+                                "chronichaemo_mhyn",
+                                "aidshiv_mhyn",
+                                "obesity_mhyn",
+                                "diabetes_type_mhyn",
+                                "diabetescom_mhyn",
+                                "diabetes_mhyn",
+                                "rheumatologic_mhyn",
+                                "dementia_mhyn",
+                                "malnutrition_mhyn",
+
+                                # "vulnerable_no_nk",
+                                "vulnerable_transplant",
+                                "vulnerable_cancers",
+                                "vulnerable_copd",
+                                "vulnerable_scid",
+                                "vulnerable_immuno",
+                                "vulnerable_preg",
+
+                                "immno_cmtrt",
+                                "infect_cmtrt",
+
+
+                                "chronic_ace_cmoccur",
+                                "chronic_arb_cmoccur",
+                                "chronic_nsaid_cmoccur"
+                                ), 
+                     add_dependent_label = FALSE,
+                     
+                     add_col_totals = TRUE, total_col = TRUE) %>% 
+  finalfit::ff_remove_ref() %>% 
+  mytable()
+```
+
+
+```{r}
+oneline %>%
+  summary_factorlist("epoch", c("vac_at_admission", "vac_n_gr28", "vac_n_gr28_factor"), 
+                     add_dependent_label = TRUE,
+                     add_col_totals = TRUE, total_col = TRUE) %>% 
+  mytable()
+```
+
+```{r}
+antiviral = oneline %>% 
+  select(starts_with("trt_")) %>% 
+  names()
+
+oneline %>% 
+  summary_factorlist("epoch", c("any_oxygen", "any_icu", "any_invasive", "any_noninvasive", "mort", "los", 
+                                "any_steroid", "dexamethasone", "dex_any", "antiviral_cmyn", antiviral), 
+                     total_col = TRUE
+                     ) %>% 
+  ff_remove_ref() %>% 
+  ff_column_totals(oneline, "epoch") %>% 
+  dependent_label(oneline, "epoch") %>% 
+  mytable()
+```
+
+
+## Oxygen use by age and epoch
+n (%)
+
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_oxygen"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  rename_with(~ gsub("Yes\\|", "", .x)) %>% 
+  mytable()
+```
+
+## ICU/HDU admission by age and epoch
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_icu"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  rename_with(~ gsub("Yes\\|", "", .x)) %>% 
+  mytable()
+```
+
+
+## Invasive mechanical ventilation by by age and epoch
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_invasive"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  rename_with(~ gsub("Yes\\|", "", .x)) %>% 
+  mytable()
+```
+
+
+## Noninvasive mechanical ventilation by by age and epoch
+n (%)
+
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_noninvasive"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No|")) %>% 
+  rename_with(~ gsub("Yes\\|", "", .x)) %>% 
+  mytable()
+```
+
+## Mortality by age and epoch
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "mort"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  rename_with(~ gsub("Yes\\|", "", .x)) %>% 
+  mytable()
+```
+
+
+
+## Length of stay by age and epoch
+mean (sd)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "los"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("unit")) %>% 
+  rename_with(~ gsub("value\\|", "", .x)) %>% 
+  mytable()
+```
+
+
+
+
+
+
+
+## Oxygen use by age and vaccination
+n (%)
+
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_oxygen"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  pivot_longer(-c(1:2)) %>% 
+  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  select(-dep) %>% 
+  pivot_wider(names_from = epoch, values_from = value) %>% 
+  mutate(across(1:2, rm_duplicates)) %>% 
+  mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
+  mytable()
+```
+
+## ICU/HDU admission by age and vaccination
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_icu"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  pivot_longer(-c(1:2)) %>% 
+  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  select(-dep) %>% 
+  pivot_wider(names_from = epoch, values_from = value) %>% 
+  mutate(across(1:2, rm_duplicates)) %>% 
+  mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
+  mytable()
+```
+
+
+## Invasive mechanical ventilation by by age and vaccination
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_invasive"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No")) %>% 
+  pivot_longer(-c(1:2)) %>% 
+  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  select(-dep) %>% 
+  pivot_wider(names_from = epoch, values_from = value) %>% 
+  mutate(across(1:2, rm_duplicates)) %>% 
+  mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
+  mytable()
+```
+
+
+## Noninvasive mechanical ventilation by by age and vaccination
+n (%)
+
+
+```{r}
+explanatory = c("age.factor")
+dependent = "any_noninvasive"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("No|")) %>% 
+  pivot_longer(-c(1:2)) %>% 
+  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  select(-dep) %>% 
+  pivot_wider(names_from = epoch, values_from = value) %>% 
+  mutate(across(1:2, rm_duplicates)) %>% 
+  mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
+  mytable()
+```
+
+## Mortality by age and vaccination
+n (%)
+
+```{r}
+explanatory = c("age.factor")
+dependent = "mort"
+
+oneline %>% 
+  finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
+                                          level_max_length = 22, add_dependent_label = TRUE) %>% 
+  select(!contains("Alive")) %>% 
+  pivot_longer(-c(1:2)) %>% 
+  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  select(-dep) %>% 
+  pivot_wider(names_from = epoch, values_from = value) %>% 
+  mutate(across(1:2, rm_duplicates)) %>% 
+  mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
+  mytable()
+```
+
+
+## Time to event modelling
+
+```{r}
+dependent = "Surv(time, status)"
+
+oneline %>% 
+  finalfit(dependent, c("age.factor", "sex", "imd_quintile"))
+
+oneline %>% 
+  finalfit(dependent, c("age.factor", "sex", "imd_quintile",
+                        "epoch"))
+  
+    
+```
+
+
+
+```{r fig.height=7, fig.width=14}
+library(survival)
+oneline %>% 
+  # filter(hostdat > ymd(20211214)) %>% 
+  mutate(epoch = fct_drop(epoch)) %>% 
+  ff_interaction(age.factor, epoch) %>% 
+  finalfit(dependent, c(# "epoch", #*age.factor", 
+    # "age.factor", 
+    "age.factor_epoch",
+    "sex", "imd_quintile", "ethnicity_4levels", 
+    "number_comorbid.factor", 
+    "vac_n_gr28_factor"))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+oneline %>% 
+  select(hostdat, any_icu, age.factor, sex, vac_n_gr28_factor) %>%
+  filter(hostdat < Sys.Date()) %>% 
+  filter(hostdat > ymd(20210501)) %>% 
+  filter(hostdat < ymd(20220101)) %>% 
+  mutate(any_icu = as.numeric(any_icu) - 1) %>% 
+  #drop_na() %>% 
+  ggplot_lancet(aes(hostdat, any_icu, colour = vac_n_gr28_factor)) + 
+  geom_smooth() 
+  facet_grid(sex ~ age.factor) 
+```
+
+
+```{r eval=FALSE, include=FALSE}
+oneline %>% 
+  select(hostdat, any_invasive, age.factor, sex) %>%
+  filter(hostdat < Sys.Date()) %>% 
+  filter(hostdat < ymd(20211214)) %>% 
+  filter(sex != "Not specified") %>% 
+  mutate(any_invasive = as.numeric(any_invasive) - 1) %>% 
+  drop_na() %>% 
+  ggplot_lancet(aes(hostdat, any_invasive)) + 
+  geom_smooth() + 
+  facet_grid(sex ~ age.factor)
+```
