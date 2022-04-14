@@ -1,7 +1,7 @@
 # Use previous matching script for steroids. 
 library(readr) # loaded with tidyverse anyway
 datadir = "/home/common/covid/cleaned/full/"
-timestamp = "2022-01-21_1245"
+timestamp = "2022-04-08_1934"
 ccp_data   = read_rds(paste0(datadir, "ccp_data_", timestamp, "_full.rds"))
 oneline    = read_rds(paste0(datadir, "topline_", timestamp, "_full.rds"))
 
@@ -436,25 +436,25 @@ steroids = ccp_data  %>%
          redcap_event_name, redcap_repeat_instrument) 
 
 #join steroid variables to topline 
-topline = topline %>% 
-  select(-c(dexamethasone, corticost_cmyn, 
-            corticost_cmtrt, corticost_cmroute,
-            corticost2_cmtrt, corticost2_cmroute,
-            corticost3_cmtrt, corticost3_cmroute)) %>%
-  left_join(steroids %>% 
-              select(subjid, dexamethasone, corticost_cmyn,
-                     corticost_cmtrt, corticost_cmroute, 
-                     corticost2_cmtrt, corticost2_cmroute,
-                     corticost3_cmtrt, corticost3_cmroute,
-                     steroid_name_1, steroid_name_2, 
-                     steroid_name_3, steroid2_name, 
-                     steroid3_name, steroid_name_1_clean, 
-                     steroid_name_2_clean, steroid_name_3_clean,
-                     steroid2_name_clean, steroid3_name_clean,
-                     any_steroid), 
-            by = "subjid")
+# topline = topline %>% 
+#   select(-c(dexamethasone, corticost_cmyn, 
+#             corticost_cmtrt, corticost_cmroute,
+#             corticost2_cmtrt, corticost2_cmroute,
+#             corticost3_cmtrt, corticost3_cmroute)) %>%
+#   left_join(steroids %>% 
+#               select(subjid, dexamethasone, corticost_cmyn,
+#                      corticost_cmtrt, corticost_cmroute, 
+#                      corticost2_cmtrt, corticost2_cmroute,
+#                      corticost3_cmtrt, corticost3_cmroute,
+#                      steroid_name_1, steroid_name_2, 
+#                      steroid_name_3, steroid2_name, 
+#                      steroid3_name, steroid_name_1_clean, 
+#                      steroid_name_2_clean, steroid_name_3_clean,
+#                      steroid2_name_clean, steroid3_name_clean,
+#                      any_steroid), 
+#             by = "subjid")
 
-saveRDS(steroids, "steroids.rds")
+saveRDS(steroids, "steroids2.rds")
 
 
 
@@ -501,6 +501,7 @@ trt_antivirals = ccp_data %>%
 
 # This could be more efficient. 
 trt_antivirals  = trt_antivirals %>% 
+  ungroup() %>% 
   mutate(across(starts_with("trt"), as.character)) %>% 
   mutate(across(starts_with("trt"), ~ if_else(is.na(.), "No", .))) %>% 
   mutate(trt_ribavirin = trt_ribavirin %>% 
@@ -538,4 +539,4 @@ trt_antivirals  = trt_antivirals %>%
            ff_label("Zanamivir")
   ) 
 
-saveRDS(trt_antivirals, "trt_antivirals.rds")
+saveRDS(trt_antivirals, "trt_antivirals2.rds")

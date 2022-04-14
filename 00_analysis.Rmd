@@ -9,13 +9,12 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-	echo = FALSE,
-	message = FALSE,
-	warning = FALSE
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
 )
-```
+select = dplyr::select
 
-```{r library}
 library(tidyverse)
 library(knitr)
 library(finalfit)
@@ -24,30 +23,77 @@ library(lubridate)
 library(egg)
 library(zoo)
 library(scales)
+library(magrittr)
+library(chiTools)
 ```
 
 ```{r}
 library(readr) # loaded with tidyverse anyway
 datadir = "/home/common/covid/cleaned/full/"
-timestamp = "2022-01-21_1245"
-# ccp_data   = read_rds(paste0(datadir, "ccp_data_", timestamp, "_full.rds"))
-# topline    = read_rds(paste0(datadir, "topline_", timestamp, "_full.rds"))
-# surv_data  = read_rds(paste0(datadir, "surv_data_", timestamp, "_full.rds"))
-# treatment  = read_rds(paste0(datadir, "treatment_", timestamp, "_full.rds"))
+
+# Up-to-date data
+timestamp = "2022-04-08_1934"
 oneline    = read_rds(paste0(datadir, "oneline_", timestamp, "_full.rds"))
-steroids = readRDS("steroids.rds")
-trt_antivirals = readRDS("trt_antivirals.rds")
+
+# Filter to subjids from 
+oneline = oneline %>% 
+  filter(hostdat < lubridate::ymd("20220401")) # Define < 2 weeks from timestamp, but we have nims data for. 
+
+nims = read_csv("~/covid_nims/nims/COCIN_NIMS__20220324.csv") %>% 
+  rename_with(tolower)
+
+voc = read_csv("~/covid_nims/nims/COCIN_VOC_Lineage__20220126T162002Z.csv") %>% 
+  rename_with(tolower)
+
+sgtf = read_csv("~/covid_nims/nims/COCIN_SGTF__20220324.csv") %>% 
+  rename_with(tolower)
+
+# Updated with 2022-04-08_1934: 
+steroids = readRDS("steroids2.rds")
+trt_antivirals = readRDS("trt_antivirals2.rds")
 load(paste0(datadir, "helpers_", timestamp, "_full.rda"))
 source("/home/eharrison/cocin_ccp/02_functions.R")
 ```
 
+```{r eval=FALSE, include=FALSE}
+# Duplicate patients / readmissions
+## Define multiple entries based on valid CHI
+## 5 minute run time
+readm = oneline %>% 
+  mutate(nhs_chi = gsub(" ", "", nhs_chi)) %>% 
+  mutate(chi_length = stringr::str_length(nhs_chi)) %>% 
+  filter(chi_length == 10) %>% 
+  mutate(valid = chi_valid(nhs_chi)) %>% 
+  filter(valid) %>% 
+  filter(nhs_chi != "0000000000") %>%
+  filter(nhs_chi != "1111111111") %T>%
+  {valid_chi_subjid <<- (.) %>% pull(subjid)} %>% 
+  group_by(nhs_chi) %>% 
+  arrange(hostdat) %>% 
+  mutate(admission_total = n(), 
+         admission_n = row_number() %>% factor(),
+         admission_days_between = hostdat - lag(hostdat),
+         admission_days_from_first = hostdat - first(hostdat)) %>% 
+  ungroup() %>% 
+  select(subjid, nhs_chi, admission_total, admission_n, admission_days_between, admission_days_from_first)
+saveRDS(valid_chi_subjid, "valid_chi_subjid2.rds")
+saveRDS(readm, "readm2.rds")
+```
+
+
 ```{r}
+valid_chi_subjid = readRDS("valid_chi_subjid2.rds")
+
 # Master filters
 oneline = oneline %>% 
-  filter(hostdat > ymd(20200201)) %>% 
+  filter(hostdat > ymd(20200117)) %>% 
   filter(hostdat < Sys.Date()) %>% 
-  filter(sex != "Not specified")
+  filter(sex != "Not specified") %>% 
+  filter(country == "England") %>% # | 
+           # country == "Wales") %>% 
+  filter(subjid %in% valid_chi_subjid)
 ```
+
 
 ```{r}
 fct_collapse_yn = function(.f){
@@ -88,8 +134,8 @@ tmp_names = names(oneline) %>% tibble()
 # London hospital check block
 oneline = oneline %>% 
   filter(!place_name %in% c("Whipps Cross University Hospital", 
-                           "Newham General Hospital",
-                           "The Royal London Hospital")
+                            "Newham General Hospital",
+                            "The Royal London Hospital")
   )
 ```
 
@@ -233,25 +279,23 @@ oneline = oneline %>%
                         "No" = "N/A") %>% 
              fct_relevel("No"))
   ) %>% 
-mutate(
-  number_comorbid = select(., chrincard:malnutrition_mhyn, -diabetes_type_mhyn) %>% 
-    {. == "Yes"} %>% 
-    rowSums(na.rm = TRUE) %>% 
-    ff_label("Number of comorbidities"),
-  
-  number_comorbid.factor = case_when(
-    number_comorbid < 1 ~ "0",
-    number_comorbid  < 2 ~ "1", 
-    is.na(number_comorbid ) ~ NA_character_,
-    TRUE ~ "2+") %>% 
-    factor() %>% 
-    ff_label("Number of comorbidities")
-)
+  mutate(
+    number_comorbid = select(., chrincard:malnutrition_mhyn, -diabetes_type_mhyn) %>% 
+      {. == "Yes"} %>% 
+      rowSums(na.rm = TRUE) %>% 
+      ff_label("Number of comorbidities"),
+    
+    number_comorbid.factor = case_when(
+      number_comorbid < 1 ~ "0",
+      number_comorbid  < 2 ~ "1", 
+      is.na(number_comorbid ) ~ NA_character_,
+      TRUE ~ "2+") %>% 
+      factor() %>% 
+      ff_label("Number of comorbidities")
+  )
 ```
 
-
-
-```{r}
+````{r}
 # Symptoms
 oneline = oneline %>% 
   mutate(across(fever_ceoccur_v2:anosmia_ceoccur_v2,
@@ -266,27 +310,128 @@ oneline = oneline %>%
       rowSums(na.rm = TRUE) %>% 
       ff_label("Number of symptoms"),
     
+    # symptoms_all_missing = select(., fever_ceoccur_v2:anosmia_ceoccur_v2) %>% 
+    #   {!is.na(.)} %>% 
+    #   rowSums(na.rm = TRUE),
+    
     number_symptoms.factor = case_when(
+      # symptoms_all_missing == 0 ~ NA_character_,
       number_symptoms < 1 ~ "0",
       number_symptoms < 2 ~ "1", 
-      is.na(number_symptoms) ~ NA_character_,
       TRUE ~ "2+") %>% 
       factor() %>% 
       ff_label("Number of symptoms"),
     
+    # any_symptoms = case_when(
+    #   number_symptoms.factor == "0" ~ "No",
+    #   number_symptoms.factor == "1" ~ "Yes",
+    #   number_symptoms.factor == "2+" ~ "Yes",
+    #   asymptomatic == "Asymptomatic" ~ "No",
+    #   no_symptoms == "YES" ~ "No",
+    #   no_symptoms_v3 == "YES" ~ "No",
+    #   adm_no_symp == 1 ~ "No",
+    #   no_symptoms == "No" ~ "Yes",
+    #   no_symptoms_v3 == "No" ~ "Yes"
+    # ) %>% 
+    #   ff_label("Any symptoms"),
+    
     any_symptoms = case_when(
       number_symptoms == 0 ~ "No",
       number_symptoms > 0 ~ "Yes",
-      asymptomatic == "Asymptomatic" ~ "No",
-      no_symptoms == "YES" ~ "No",
-      no_symptoms_v3 == "YES" ~ "No",
-      adm_no_symp == 1 ~ "No",
-      no_symptoms == "No" ~ "Yes",
-      no_symptoms_v3 == "No" ~ "Yes"
     ) %>% 
       ff_label("Any symptoms")
   )
 ```
+
+
+```{r}
+# Use NIMS data as primary source
+## Include isaric data "covid19_vaccine == 'Yes'" as vaccinated at admission?
+## grep("vac", names(oneline), value = TRUE)
+## Not included at the moment as not clear how many doses received. 
+vac = oneline %>% 
+  select(subjid, hostdat) %>% 
+  left_join(nims, by = c("subjid" = "external_id")) %>% 
+  mutate(admission_to_vac = (hostdat - ymd(date_administered)) %>% as.numeric(),
+         vac_at_admission = if_else(admission_to_vac > 28, "Yes", "No")) %>% 
+  group_by(subjid) %>% 
+  mutate(vac_n_gr28 = sum(admission_to_vac > 28)) %>% 
+  summarise(subjid = first(subjid),
+            hostdat = first(hostdat), 
+            vac_at_admission = if_else(any(vac_at_admission == "Yes"), "Yes", "No"),
+            vac_n_gr28 = first(vac_n_gr28)) %>% 
+  mutate(vac_at_admission = if_else(is.na(vac_at_admission) & 
+                                      hostdat <  ymd(20201208), "No", vac_at_admission) %>% 
+           fct_explicit_na(na_level = "Unknown"),
+         vac_n_gr28 = if_else(is.na(vac_n_gr28)& 
+                                hostdat <  ymd(20201208), 0L, vac_n_gr28),
+         vac_n_gr28_factor = factor(vac_n_gr28) %>% 
+           fct_explicit_na(na_level = "Unknown") %>% 
+           fct_recode(
+             "3+" = "3",
+             "3+" = "4"
+           )) %>% 
+  select(-hostdat)
+
+vac %>% count(vac_n_gr28_factor)
+oneline = oneline %>% 
+  left_join(vac) %>% 
+  mutate(
+    vac_at_admission = ff_label(vac_at_admission, "Vaccination >28 days prior to admission"),
+    vac_n_gr28 = ff_label(vac_n_gr28, "Number of vaccinations >28 days prior to admission"),
+    vac_n_gr28_factor = ff_label(vac_n_gr28_factor, "Number of vaccinations >28 days prior to admission")
+  )
+```
+
+```{r Impute, eval=FALSE, include=FALSE}
+## Multiple imputation
+library(mice)
+imputation_variables = c("age", "age.factor", "sex", "imd_quintile",
+                        "vac_n_gr28_factor", 
+                        "ethnicity_4levels",
+                        "number_comorbid", 
+                        "number_symptoms", "rr_vsorres",
+                        "oxy_vsorres", "daily_gcs_vsorres.day1",
+                        "daily_bun_lborres.day1", "daily_crp_lborres.day1",
+                        
+                        # For news
+                        "sysbp_vsorres", "hr_vsorres", "temp_vsorres", 
+                        
+                        "subjid") 
+
+set.seed(1)
+# Choose not to impute missing values
+# for explanatory variable of interest and
+# outcome variable. 
+# But include in algorithm for imputation.
+predM = oneline %>% 
+  select(imputation_variables) %>% 
+  missing_predictorMatrix(
+    drop_from_imputed = c("subjid", "vac_n_gr28_factor"), 
+    drop_from_imputer = c("subjid"))
+
+# This is needed to drop from imputed!
+m0 = mice(oneline %>% 
+            select(imputation_variables), maxit=0)
+m0$method[c("subjid")] = ""
+m0$method[c("vac_n_gr28_factor")] = ""
+
+oneline_imputed = oneline %>% 
+  select(imputation_variables) %>% 
+  mice(m = 10, predictorMatrix = predM, maxit = 10, method = m0$method)
+
+  # parlmice(m = 10, predictorMatrix = predM, maxit = 10, 
+  #          n.core = 5, n.imp.core = 2, method = m0$method)
+plot(oneline_imputed)
+summary(oneline_imputed)
+
+saveRDS(oneline_imputed, "oneline_imputed.rds")
+```
+
+```{r}
+oneline_imputed = readRDS("oneline_imputed.rds")
+```
+
 
 ```{r 4C-mortality}
 isaric_lasso <- function(.data, age, sex, comorbid, rr, spo2, gcs, crp, bun,
@@ -433,42 +578,6 @@ oneline = oneline %>%
   )
 ```
 
-```{r}
-# Vaccination
-nims = read_csv("~/covid_nims/nims/COCIN_NIMS__20220123.csv") %>% 
-  rename_with(tolower) %>% 
-  filter(date_administered != "None")
-```
-
-```{r}
-vac = oneline %>% 
-  select(subjid, hostdat) %>% 
-  left_join(nims, by = c("subjid" = "external_id")) %>% 
-  mutate(admission_to_vac = (hostdat - ymd(date_administered)) %>% as.numeric(),
-         vac_at_admission = if_else(admission_to_vac > 28, "Yes", "No")) %>% 
-  group_by(subjid) %>% 
-  mutate(vac_n_gr28 = sum(admission_to_vac > 28)) %>% 
-  summarise(subjid = first(subjid),
-            hostdat = first(hostdat), 
-            vac_at_admission = if_else(any(vac_at_admission == "Yes"), "Yes", "No"),
-            vac_n_gr28 = first(vac_n_gr28)) %>% 
-  mutate(vac_at_admission = if_else(is.na(vac_at_admission), "No", vac_at_admission),
-         vac_n_gr28 = if_else(is.na(vac_n_gr28), 0L, vac_n_gr28),
-         vac_n_gr28_factor = factor(vac_n_gr28) %>% 
-           fct_recode(
-             "3+" = "3",
-             "3+" = "4"
-           )) %>% 
-  select(-hostdat)
-
-oneline = oneline %>% 
-  left_join(vac) %>% 
-  mutate(
-    vac_at_admission = ff_label(vac_at_admission, "Vaccination >28 days prior to admission"),
-    vac_n_gr28 = ff_label(vac_n_gr28, "Number of vaccinations >28 days prior to admission"),
-    vac_n_gr28_factor = ff_label(vac_n_gr28_factor, "Number of vaccinations >28 days prior to admission")
-  )
-```
 
 ```{r}
 # Isoweek
@@ -477,9 +586,9 @@ isoweek_lookup = tibble(date = seq(ymd(20200101), ymd(20220601), by = 1)) %>%
 
 isoweek_lookup = isoweek_lookup %>% 
   left_join(isoweek_lookup %>% 
-  group_by(isoweek) %>% 
-  slice(1) %>% 
-  select(isoweek_date = date, isoweek)
+              group_by(isoweek) %>% 
+              slice(1) %>% 
+              select(isoweek_date = date, isoweek)
   )
 ```
 
@@ -488,13 +597,58 @@ isoweek_lookup = isoweek_lookup %>%
 oneline = oneline %>% 
   left_join(isoweek_lookup, by = c("hostdat" = "date")) %>% 
   mutate(epoch = case_when(
-         hostdat < ymd(20200901) ~ "Jan 2020 - Aug 2020",
-         hostdat < ymd(20210501) ~ "Sept 2020 - April 2021",
-         hostdat < ymd(20211214) ~ "May 2021 - 13 Dec 2021",
-         TRUE ~ "14 Dec 2021 - 21 Jan 2022") %>% 
-           fct_relevel("Jan 2020 - Aug 2020", "Sept 2020 - April 2021",  "May 2021 - 13 Dec 2021", "14 Dec 2021 - 21 Jan 2022")
+    hostdat < ymd(20200901) ~ "Jan 2020 - Aug 2020",
+    hostdat < ymd(20210501) ~ "Sept 2020 - April 2021",
+    hostdat < ymd(20211214) ~ "May 2021 - 13 Dec 2021",
+    TRUE ~ "14 Dec 2021 - 21 Jan 2022") %>% 
+      fct_relevel("Jan 2020 - Aug 2020", "Sept 2020 - April 2021",  "May 2021 - 13 Dec 2021", "14 Dec 2021 - 21 Jan 2022") %>% 
+      ff_label("Time period")
   )
 ```
+
+```{r}
+# Readmission
+## Difficult to know what to do here. 
+## Consider any admission within 90 days of first admission, to be for the same infection
+## Collapse down outcome measures and remove >0 <90 episode. 
+## Consider any admission >90 days after index admission to be new
+## These are relatively few, and on a skim through no outcomes are different on the readmission
+## i.e. not one was readmitted and died. 
+## So simple remove the later admissions so not double counting. 
+
+readm = readRDS("readm2.rds")
+
+admission_cutoff = 90
+
+oneline = oneline %>% 
+  left_join(readm %>% select(-nhs_chi)) %>% 
+  mutate(admission_days_from_first = as.numeric(admission_days_from_first)) %>% 
+  group_by(nhs_chi) %>% 
+  mutate(
+    any_oxygen = 
+      if_else(admission_days_from_first <= admission_cutoff &
+                any(any_oxygen == "Yes"), "Yes", "No"),
+    any_icu = if_else(admission_days_from_first <= admission_cutoff &
+                        any(any_icu == "Yes"), "Yes", "No"),
+    any_invasive = if_else(admission_days_from_first <= admission_cutoff &
+                             any(any_invasive == "Yes"), "Yes", "No"),
+    mort = if_else(admission_days_from_first <= admission_cutoff &
+                     any(mort == "Died"), "Died", "Alive"),
+    any_steroid = if_else(admission_days_from_first <= admission_cutoff &
+                            any(any_steroid == "Yes"), "Yes", "No")) %>% 
+  filter((admission_days_from_first == 0 & admission_n == 1) |
+           admission_days_from_first > admission_cutoff) %>% 
+  filter(admission_days_from_first < admission_cutoff | 
+           row_number() == 2) %>% 
+  ungroup() %>% 
+  mutate(across(c(any_oxygen, any_icu, any_invasive, any_steroid), ~ factor(.) %>% fct_relevel("No"))) %>%
+  mutate(mort = factor(mort) %>% fct_relevel("Alive")) %>% 
+  ff_relabel_df(oneline)
+
+# Note, haven't done:
+# "dexamethasone", "dex_any", "antiviral_cmyn", antiviral)
+```
+
 
 ```{r}
 fct_case_when <- function(...) {
@@ -524,7 +678,7 @@ oneline %>%
       onset2admission > 14 ~ ">14 days prior"
     ) %>% 
       ff_label("Symptom onset to admission/study entry")
-    ) %>% 
+  ) %>% 
   summary_factorlist("epoch", c("any_symptoms", "onset2admission", "onset2admission.factor"), 
                      add_dependent_label = TRUE,
                      add_col_totals = TRUE, total_col = TRUE, na_include = TRUE) %>% 
@@ -575,7 +729,7 @@ oneline %>%
                                 "rheumatologic_mhyn",
                                 "dementia_mhyn",
                                 "malnutrition_mhyn",
-
+                                
                                 # "vulnerable_no_nk",
                                 "vulnerable_transplant",
                                 "vulnerable_cancers",
@@ -583,18 +737,18 @@ oneline %>%
                                 "vulnerable_scid",
                                 "vulnerable_immuno",
                                 "vulnerable_preg",
-
+                                
                                 "immno_cmtrt",
                                 "infect_cmtrt",
-
-
+                                
+                                
                                 "chronic_ace_cmoccur",
                                 "chronic_arb_cmoccur",
                                 "chronic_nsaid_cmoccur"
-                                ), 
-                     add_dependent_label = FALSE,
-                     
-                     add_col_totals = TRUE, total_col = TRUE) %>% 
+  ), 
+  add_dependent_label = FALSE,
+  
+  add_col_totals = TRUE, total_col = TRUE) %>% 
   finalfit::ff_remove_ref() %>% 
   mytable()
 ```
@@ -617,7 +771,7 @@ oneline %>%
   summary_factorlist("epoch", c("any_oxygen", "any_icu", "any_invasive", "any_noninvasive", "mort", "los", 
                                 "any_steroid", "dexamethasone", "dex_any", "antiviral_cmyn", antiviral), 
                      total_col = TRUE
-                     ) %>% 
+  ) %>% 
   ff_remove_ref() %>% 
   ff_column_totals(oneline, "epoch") %>% 
   dependent_label(oneline, "epoch") %>% 
@@ -636,7 +790,7 @@ dependent = "any_oxygen"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   rename_with(~ gsub("Yes\\|", "", .x)) %>% 
   mytable()
 ```
@@ -651,7 +805,7 @@ dependent = "any_icu"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   rename_with(~ gsub("Yes\\|", "", .x)) %>% 
   mytable()
 ```
@@ -667,7 +821,7 @@ dependent = "any_invasive"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   rename_with(~ gsub("Yes\\|", "", .x)) %>% 
   mytable()
 ```
@@ -689,6 +843,7 @@ oneline %>%
   mytable()
 ```
 
+
 ## Mortality by age and epoch
 n (%)
 
@@ -699,11 +854,10 @@ dependent = "mort"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = "epoch", column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   rename_with(~ gsub("Yes\\|", "", .x)) %>% 
   mytable()
 ```
-
 
 
 ## Length of stay by age and epoch
@@ -722,11 +876,6 @@ oneline %>%
 ```
 
 
-
-
-
-
-
 ## Oxygen use by age and vaccination
 n (%)
 
@@ -738,15 +887,16 @@ dependent = "any_oxygen"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>% 
   pivot_longer(-c(1:2)) %>% 
-  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  separate(name, sep = "\\|", into = c("dep", "Vaccination n", "epoch")) %>% 
   select(-dep) %>% 
   pivot_wider(names_from = epoch, values_from = value) %>% 
   mutate(across(1:2, rm_duplicates)) %>% 
   mutate(across(4:7, ~ str_replace_na(., "0 (0.0)"))) %>% 
   mytable()
 ```
+
 
 ## ICU/HDU admission by age and vaccination
 n (%)
@@ -758,9 +908,9 @@ dependent = "any_icu"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   pivot_longer(-c(1:2)) %>% 
-  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  separate(name, sep = "\\|", into = c("dep", "Vaccination n", "epoch")) %>% 
   select(-dep) %>% 
   pivot_wider(names_from = epoch, values_from = value) %>% 
   mutate(across(1:2, rm_duplicates)) %>% 
@@ -779,9 +929,9 @@ dependent = "any_invasive"
 oneline %>% 
   finalfit::summary_factorlist_stratified(dependent, explanatory, split = c("vac_n_gr28_factor", "epoch"), column = FALSE,
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
-  select(!contains("No")) %>% 
+  select(!starts_with("No")) %>%  
   pivot_longer(-c(1:2)) %>% 
-  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  separate(name, sep = "\\|", into = c("dep", "Vaccination n", "epoch")) %>% 
   select(-dep) %>% 
   pivot_wider(names_from = epoch, values_from = value) %>% 
   mutate(across(1:2, rm_duplicates)) %>% 
@@ -803,7 +953,7 @@ oneline %>%
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
   select(!contains("No|")) %>% 
   pivot_longer(-c(1:2)) %>% 
-  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  separate(name, sep = "\\|", into = c("dep", "Vaccination n", "epoch")) %>% 
   select(-dep) %>% 
   pivot_wider(names_from = epoch, values_from = value) %>% 
   mutate(across(1:2, rm_duplicates)) %>% 
@@ -823,7 +973,7 @@ oneline %>%
                                           level_max_length = 22, add_dependent_label = TRUE) %>% 
   select(!contains("Alive")) %>% 
   pivot_longer(-c(1:2)) %>% 
-  separate(name, sep = "[^[:alnum:] 1234567890-]+", into = c("dep", "Vaccination n", "epoch")) %>% 
+  separate(name, sep = "\\|", into = c("dep", "Vaccination n", "epoch")) %>% 
   select(-dep) %>% 
   pivot_wider(names_from = epoch, values_from = value) %>% 
   mutate(across(1:2, rm_duplicates)) %>% 
@@ -835,22 +985,157 @@ oneline %>%
 ## Time to event modelling
 
 ```{r}
+# Model structure
+explanatory_base = c("epoch", "age.factor", "sex", "imd_quintile")
+explanatory_vac  = c("epoch", "age.factor", "sex", "imd_quintile",
+                        "vac_n_gr28_factor")
+explanatory_full = c("epoch", "age.factor", "sex", "imd_quintile",
+                        "vac_n_gr28_factor", 
+                        "ethnicity_4levels",
+                        "number_comorbid", 
+                        "number_symptoms")# , "isaric_phys")
+```
+
+```{r}
+oneline %>% 
+  select(explanatory_full, vac_n_gr28) %>% 
+  missing_glimpse()
+```
+
+
+```{r}
+# Define complete/nested dataset
+oneline_reduced = oneline %>% 
+  mutate(
+    ethnicity_4levels = fct_explicit_na(ethnicity_4levels, "Unknown"),
+    imd_quintile = fct_explicit_na(imd_quintile, "Unknown")
+  ) %>% 
+  dplyr::select(explanatory_full, time, status, any_oxygen, any_icu, any_invasive, vac_n_gr28) %>% 
+  
+  # Option
+  # mutate(vac_n_gr28_factor = fct_recode(vac_n_gr28_factor, NULL = "Unknown")) %>% 
+  # Complete data         
+  drop_na()
+
+oneline %>% 
+  dplyr::select(explanatory_full, time, status, any_oxygen, any_icu, any_invasive, vac_n_gr28) %>% 
+  missing_glimpse()
+```
+
+```{r}
 dependent = "Surv(time, status)"
 
-oneline %>% 
-  finalfit(dependent, c("age.factor", "sex", "imd_quintile"))
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_base, metrics = TRUE)
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
 
-oneline %>% 
-  finalfit(dependent, c("age.factor", "sex", "imd_quintile",
-                        "epoch"))
-  
-    
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_vac, metrics = TRUE) 
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_full, metrics = TRUE)
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+## Other outcomes
+
+### O2
+
+```{r}
+dependent = "any_oxygen"
+
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_base, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_vac, metrics = TRUE, confint_type = "default") 
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_full, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+### ICU/HDU
+
+```{r}
+dependent = "any_icu"
+
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_base, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_vac, metrics = TRUE, confint_type = "default") 
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_full, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+### IMV
+
+```{r}
+dependent = "any_invasive"
+
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_base, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_vac, metrics = TRUE, confint_type = "default") 
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
+```
+
+
+```{r}
+t = oneline_reduced %>% 
+  finalfit(dependent, explanatory_full, metrics = TRUE, confint_type = "default")
+t[[1]] %>% mytable()
+t[[2]] %>% mytable()
 ```
 
 
 
 ```{r fig.height=7, fig.width=14}
 library(survival)
+dependent = "Surv(time, status)"
 oneline %>% 
   # filter(hostdat > ymd(20211214)) %>% 
   mutate(epoch = fct_drop(epoch)) %>% 
@@ -874,7 +1159,7 @@ oneline %>%
   #drop_na() %>% 
   ggplot_lancet(aes(hostdat, any_icu, colour = vac_n_gr28_factor)) + 
   geom_smooth() 
-  facet_grid(sex ~ age.factor) 
+facet_grid(sex ~ age.factor) 
 ```
 
 
@@ -889,4 +1174,572 @@ oneline %>%
   ggplot_lancet(aes(hostdat, any_invasive)) + 
   geom_smooth() + 
   facet_grid(sex ~ age.factor)
+```
+
+
+```{r}
+# Manuscript numbers
+oneline %>% 
+  distinct(place_name) %>% 
+  dim()
+# 325
+
+```
+
+
+
+```{r eval=FALSE, include=FALSE}
+# Contrasts
+# "Jan 2020 - Aug 2020"       "Sept 2020 - April 2021"    "May 2021 - 13 Dec 2021"    "14 Dec 2021 - 21 Jan 2022"
+
+
+
+med_data = oneline_reduced 
+
+# Medflex --------------------------------------------------------------------
+library(medflex)
+dependent = "any_oxygen"
+explanatory = c("epoch", "age.factor", "sex", "imd_quintile",
+                        "vac_n_gr28_factor", 
+                        "ethnicity_4levels",
+                        "number_comorbid", 
+                        "number_symptoms") #, "isaric_phys")
+
+# med_data = surv_data_mids %>% 
+#   mice::complete(1)
+
+# Imputation method
+# Format required:
+Y ~ X + M + C1 + C2 + X:C1 + M:C1
+
+
+# DECIDE IF CONTINUOUS OR FACTOR MEDIATOR
+
+# No confounders or interaction. 
+expData = neImpute(any_oxygen ~ epoch + vac_n_gr28, 
+           family = binomial("logit"), 
+           data = med_data)
+neMod1 = neModel(any_oxygen ~ epoch0 + epoch1, family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod1)
+effdecomp = neEffdecomp(neMod1, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp)[["natural direct effect"]], 
+                                   coef(effdecomp)[["natural indirect effect"]])
+
+
+# Confounders, no interaction. 
+expData = neImpute(any_oxygen ~ epoch + vac_n_gr28 + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data)
+neMod2 = neModel(any_oxygen ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, #number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+
+
+
+
+# Confounders and interactio0 # Not working because exposure has 4 levels? 
+med_data = oneline_reduced %>% select(any_oxygen, epoch, vac_n_gr28, age.factor, sex, imd_quintile, ethnicity_4levels, number_comorbid)
+expData = neImpute(any_oxygen ~ epoch * vac_n_gr28 + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data)
+neMod3 = neModel(any_oxygen ~ epoch0 * epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, #number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+
+summary(neMod3)
+effdecomp3 = neEffdecomp(neMod3, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp3)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp3)[["pure direct effect"]], 
+                                   coef(effdecomp3)[["total indirect effect"]])
+plot(neMod3, transf = exp)
+vcov = neMod3$vcov[c(2, 23), c(2, 23)]
+sqrt(sum(diag(vcov)) + (2*vcov[upper.tri(vcov)]))
+
+# Confounders, no interaction + physiology
+expData = neImpute(any_oxygen ~ epoch + vac_n_gr28*isaric_phys + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data, nMed = 2)
+neMod2 = neModel(any_oxygen ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, #number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2)
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+
+
+
+# ICU
+# No confounders or interaction. 
+expData = neImpute(any_icu ~ epoch + vac_n_gr28, 
+           family = binomial("logit"), data = med_data)
+neMod1 = neModel(any_icu ~ epoch0 + epoch1, family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod1)
+effdecomp = neEffdecomp(neMod1)
+summary(effdecomp)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp)[["natural direct effect"]], 
+                                   coef(effdecomp)[["natural indirect effect"]])
+
+
+# Confounders, no interaction. 
+expData = neImpute(any_icu ~ epoch + vac_n_gr28 + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data)
+neMod2 = neModel(any_icu ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, # number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2, xRef = c( "May 2021 - 13 Dec 2021" , "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+
+
+
+# Confounders, no interaction. 
+expData = neImpute(any_icu ~ epoch + vac_n_gr28 * number_symptoms + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data, nMed = 2)
+neMod2 = neModel(any_icu ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, # number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+
+
+
+
+# IMV
+# No confounders or interaction. 
+expData = neImpute(any_invasive ~ epoch + vac_n_gr28, 
+           family = binomial("logit"), data = med_data)
+neMod1 = neModel(any_invasive ~ epoch0 + epoch1, family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod1)
+effdecomp = neEffdecomp(neMod1)
+summary(effdecomp)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp)[["natural direct effect"]], 
+                                   coef(effdecomp)[["natural indirect effect"]])
+
+
+# Confounders, no interaction. 
+expData = neImpute(any_invasive ~ epoch + vac_n_gr28 + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data)
+neMod2 = neModel(any_invasive ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, # number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+
+
+
+# Confounders, no interaction. 
+expData = neImpute(any_icu ~ epoch + vac_n_gr28 * number_symptoms + 
+                     age.factor + sex + imd_quintile +
+                     ethnicity_4levels +
+                     number_comorbid, #number_symptoms + isaric_phys, 
+                   family = binomial("logit"), data = med_data, nMed = 2)
+neMod2 = neModel(any_icu ~ epoch0 + epoch1 + 
+                   age.factor + sex + imd_quintile +
+                   ethnicity_4levels +
+                   number_comorbid, # number_symptoms, # + isaric_phys, 
+                 family = binomial("logit"), 
+                 expData = expData, se = "robust")
+summary(neMod2)
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+summary(effdecomp2)
+regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
+                                   coef(effdecomp2)[["natural indirect effect"]])
+```
+
+
+```{r eval=FALSE, include=FALSE}
+tmp = oneline_imputed %>% 
+  mice::complete("all") %>% 
+  map(~ left_join(., 
+                  oneline %>% select(subjid, any_oxygen, epoch, vac_n_gr28)) %>% 
+        drop_na())
+tmp2 = mitools::imputationList(tmp)
+
+
+# With mice
+expData = with(tmp2, neImpute(any_oxygen ~ epoch + vac_n_gr28, 
+                   family = binomial("logit")))
+expData2 = mitools::imputationList(expData)
+neMod1m = with(expData2, neModel(any_oxygen ~ epoch0 + epoch1, 
+                 family = binomial("logit"), se = "robust"))
+
+effdecomp1m =  neMod1m %>% 
+  map(~ neEffdecomp(., xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+  )
+
+summary(effdecomp2)
+
+list(summary(effdecomp2)$coefficients,
+     summary(effdecomp2)$coefficients) %>% 
+  reduce(`+`) %>% 
+  {. / 2}
+
+
+neMod_mi = mitools::MIcombine(neMod1m)
+effdecomp2 = neEffdecomp(neMod_mi , xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+data.frame(
+  results = neMod_mi$coefficients,
+  se = sqrt(diag(neMod_mi$variance)),
+  z = neMod_mi$coefficients / sqrt(diag(neMod_mi$variance)),
+  p = 2 * pnorm(-abs(neMod_mi$coefficients / sqrt(diag(neMod_mi$variance))))
+)
+```
+
+```{r eval=FALSE, include=FALSE}
+neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
+                                                                         "epoch114 Dec 2021 - 21 Jan 2022")] 
+
+neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
+                                                                   "epoch114 Dec 2021 - 21 Jan 2022"),
+                               names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
+                                                                   "epoch114 Dec 2021 - 21 Jan 2022")] 
+
+# THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
+out = data.frame(
+  effect = c("pnde", "tnde", "pnie", "tnie", "te"),
+  estimate = c(neMod5_coefs[[1]],
+               neMod5_coefs[[1]] + neMod5_coefs[[3]],
+               neMod5_coefs[[2]],
+               neMod5_coefs[[2]] + neMod5_coefs[[3]],
+               neMod5_coefs[[1]] + neMod5_coefs[[2]] + neMod5_coefs[[3]]),
+  se = c(sqrt(diag(neMod5_var)[[1]]),
+         sqrt(sum(diag( neMod5_var[c(1,3), c(1,3)])) + sum((2*  neMod5_var[c(1,3), c(1,3)] [upper.tri( neMod5_var[c(1,3), c(1,3)] )]))),
+         sqrt(sum(diag(neMod5_var)[[2]])),
+         sqrt(sum(diag( neMod5_var[c(2,3), c(2,3)])) + sum((2*  neMod5_var[c(2,3), c(2,3)] [upper.tri( neMod5_var[c(2,3), c(2,3)] )]))),
+         sqrt(sum(diag(neMod5_var)) + sum((2* neMod5_var[upper.tri(neMod5_var)]))))
+)
+out = out %>% 
+  mutate(
+    z = estimate / se,
+    p = 2 * pnorm(-abs(z)),
+    L95 = estimate - (1.96 * se),
+    U95 = estimate + (1.96 * se)
+  ) %>% 
+  mutate(across(c("estimate", "L95", "U95"), exp))
+
+out
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# With mice final
+# Confounder and NO STEROID 
+expData = with(surv_data_mids, neImpute(death_xdays ~ week_admission * any_icu_ventilation_ox + 
+                                          age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                          oxy_vsorres + daily_gcs_vsorres + 
+                                          daily_crp_lborres + daily_bun_lborres, 
+                                        family = binomial("logit")))
+expData = mitools::imputationList(expData$analyses)
+neMod5m = with(expData, neModel(death_xdays ~ week_admission0 * week_admission1 + 
+                                  age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                  oxy_vsorres + daily_gcs_vsorres + 
+                                  daily_crp_lborres + daily_bun_lborres, 
+                                family = binomial("logit"), 
+                                se = "robust"))
+neMod_mi = mitools::MIcombine(neMod5m)
+data.frame(
+  results = neMod_mi$coefficients,
+  se = sqrt(diag(neMod_mi$variance)),
+  z = neMod_mi$coefficients / sqrt(diag(neMod_mi$variance)),
+  p = 2 * pnorm(-abs(neMod_mi$coefficients / sqrt(diag(neMod_mi$variance))))
+)
+
+neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                         "week_admission1", "week_admission0:week_admission1")] 
+
+neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1"),
+                               names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1")] 
+
+# THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
+out = data.frame(
+  effect = c("pnde", "tnde", "pnie", "tnie", "te"),
+  estimate = c(neMod5_coefs[[1]],
+               neMod5_coefs[[1]] + neMod5_coefs[[3]],
+               neMod5_coefs[[2]],
+               neMod5_coefs[[2]] + neMod5_coefs[[3]],
+               neMod5_coefs[[1]] + neMod5_coefs[[2]] + neMod5_coefs[[3]]),
+  se = c(sqrt(diag(neMod5_var)[[1]]),
+         sqrt(sum(diag( neMod5_var[c(1,3), c(1,3)])) + sum((2*  neMod5_var[c(1,3), c(1,3)] [upper.tri( neMod5_var[c(1,3), c(1,3)] )]))),
+         sqrt(sum(diag(neMod5_var)[[2]])),
+         sqrt(sum(diag( neMod5_var[c(2,3), c(2,3)])) + sum((2*  neMod5_var[c(2,3), c(2,3)] [upper.tri( neMod5_var[c(2,3), c(2,3)] )]))),
+         sqrt(sum(diag(neMod5_var)) + sum((2* neMod5_var[upper.tri(neMod5_var)]))))
+)
+out = out %>% 
+  mutate(
+    z = estimate / se,
+    p = 2 * pnorm(-abs(z)),
+    L95 = estimate - (1.96 * se),
+    U95 = estimate + (1.96 * se)
+  ) %>% 
+  mutate(across(c("estimate", "L95", "U95"), exp))
+
+# SEE BELOW FOR NEW FORMAT
+
+# With mice final
+# Confounder and include steroid and interaction
+expData = with(surv_data_mids, neImpute(death_xdays ~ week_admission * any_icu_ventilation_ox * any_steroid + 
+                     age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                     oxy_vsorres + daily_gcs_vsorres + 
+                     daily_crp_lborres + daily_bun_lborres, 
+                   family = binomial("logit"), nMed = 2))
+expData = mitools::imputationList(expData$analyses)
+neMod5m = with(expData, neModel(death_xdays ~ week_admission0 * week_admission1 + 
+                   age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                   oxy_vsorres + daily_gcs_vsorres + 
+                   daily_crp_lborres + daily_bun_lborres, 
+                 family = binomial("logit"), 
+                 se = "robust"))
+neMod_mi = mitools::MIcombine(neMod5m)
+data.frame(
+  results = neMod_mi$coefficients,
+  se = sqrt(diag(neMod_mi$variance)),
+  z = neMod_mi$coefficients / sqrt(diag(neMod_mi$variance)),
+  p = 2 * pnorm(-abs(neMod_mi$coefficients / sqrt(diag(neMod_mi$variance))))
+)
+
+neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                          "week_admission1", "week_admission0:week_admission1")] 
+
+neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                          "week_admission1", "week_admission0:week_admission1"),
+                  names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                      "week_admission1", "week_admission0:week_admission1")] 
+
+# THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
+out = data.frame(
+  effect = c("pnde", "tnde", "pnie", "tnie", "te"),
+  estimate = c(neMod5_coefs[[1]],
+               neMod5_coefs[[1]] + neMod5_coefs[[3]],
+               neMod5_coefs[[2]],
+               neMod5_coefs[[2]] + neMod5_coefs[[3]],
+               neMod5_coefs[[1]] + neMod5_coefs[[2]] + neMod5_coefs[[3]]),
+  se = c(sqrt(diag(neMod5_var)[[1]]),
+         sqrt(sum(diag( neMod5_var[c(1,3), c(1,3)])) + sum((2*  neMod5_var[c(1,3), c(1,3)] [upper.tri( neMod5_var[c(1,3), c(1,3)] )]))),
+         sqrt(sum(diag(neMod5_var)[[2]])),
+         sqrt(sum(diag( neMod5_var[c(2,3), c(2,3)])) + sum((2*  neMod5_var[c(2,3), c(2,3)] [upper.tri( neMod5_var[c(2,3), c(2,3)] )]))),
+         sqrt(sum(diag(neMod5_var)) + sum((2* neMod5_var[upper.tri(neMod5_var)]))))
+  )
+out = out %>% 
+  mutate(
+    z = estimate / se,
+    p = 2 * pnorm(-abs(z)),
+    L95 = estimate - (1.96 * se),
+    U95 = estimate + (1.96 * se)
+  ) %>% 
+  mutate(across(c("estimate", "L95", "U95"), exp))
+
+out
+
+
+regmedint:::prop_med_yreg_logistic(-0.17332193, -0.05565375)
+
+
+
+
+x074 = -0.3011051
+x077 = -0.2613648
+x081 = -0.210721
+
+
+(x077 - x074) / x081
+
+log(0.19)
+
+
+
+
+
+
+
+
+
+
+# With mice final
+# Confounder and STEROID no ICU
+expData = with(surv_data_mids, neImpute(death_xdays ~ week_admission * any_steroid + 
+                                          age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                          oxy_vsorres + daily_gcs_vsorres + 
+                                          daily_crp_lborres + daily_bun_lborres, 
+                                        family = binomial("logit")))
+expData = mitools::imputationList(expData$analyses)
+neMod5m = with(expData, neModel(death_xdays ~ week_admission0 * week_admission1 + 
+                                  age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                  oxy_vsorres + daily_gcs_vsorres + 
+                                  daily_crp_lborres + daily_bun_lborres, 
+                                family = binomial("logit"), 
+                                se = "robust"))
+neMod_mi = mitools::MIcombine(neMod5m)
+data.frame(
+  results = neMod_mi$coefficients,
+  se = sqrt(diag(neMod_mi$variance)),
+  z = neMod_mi$coefficients / sqrt(diag(neMod_mi$variance)),
+  p = 2 * pnorm(-abs(neMod_mi$coefficients / sqrt(diag(neMod_mi$variance))))
+)
+
+neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                         "week_admission1", "week_admission0:week_admission1")] 
+
+neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1"),
+                               names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1")] 
+
+# THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
+out = data.frame(
+  effect = c("pnde", "tnde", "pnie", "tnie", "te"),
+  estimate = c(neMod5_coefs[[1]],
+               neMod5_coefs[[1]] + neMod5_coefs[[3]],
+               neMod5_coefs[[2]],
+               neMod5_coefs[[2]] + neMod5_coefs[[3]],
+               neMod5_coefs[[1]] + neMod5_coefs[[2]] + neMod5_coefs[[3]]),
+  se = c(sqrt(diag(neMod5_var)[[1]]),
+         sqrt(sum(diag( neMod5_var[c(1,3), c(1,3)])) + sum((2*  neMod5_var[c(1,3), c(1,3)] [upper.tri( neMod5_var[c(1,3), c(1,3)] )]))),
+         sqrt(sum(diag(neMod5_var)[[2]])),
+         sqrt(sum(diag( neMod5_var[c(2,3), c(2,3)])) + sum((2*  neMod5_var[c(2,3), c(2,3)] [upper.tri( neMod5_var[c(2,3), c(2,3)] )]))),
+         sqrt(sum(diag(neMod5_var)) + sum((2* neMod5_var[upper.tri(neMod5_var)]))))
+)
+out = out %>% 
+  mutate(
+    z = estimate / se,
+    p = 2 * pnorm(-abs(z)),
+    exp_estimate = estimate,
+    L95 = estimate - (1.96 * se),
+    U95 = estimate + (1.96 * se)
+  ) %>% 
+  mutate(across(c("exp_estimate", "L95", "U95"), exp))
+
+
+regmedint:::prop_med_yreg_logistic(-0.288895399,  0.008128431)
+
+
+
+
+
+
+
+
+
+# FINAL REVISION WITH NEW OBJECTS ---------------------------------------------------------------------------
+# With mice final
+# Confounder and include steroid and interaction
+
+# With mice final
+# Confounder and include steroid and interaction
+surv_data_mids_reconstructed = surv_data_mids %>% 
+  mice::complete("all") %>% 
+  map(~ mutate(., week_admission = (week_admission *4) / 7)) %>% 
+  mitools::imputationList()
+  
+expData = with(surv_data_mids_reconstructed, neImpute(death_xdays ~ week_admission * any_icu_ventilation_ox * any_steroid + 
+                                          age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                          oxy_vsorres + daily_gcs_vsorres + 
+                                          daily_crp_lborres + daily_bun_lborres, 
+                                        family = binomial("logit"), nMed = 2))
+expData = mitools::imputationList(expData)
+neMod5m = with(expData, neModel(death_xdays ~ week_admission0 * week_admission1 + 
+                                  age + sex + imd_quintile + no_comorb + rr_vsorres + 
+                                  oxy_vsorres + daily_gcs_vsorres + 
+                                  daily_crp_lborres + daily_bun_lborres, 
+                                family = binomial("logit"), 
+                                se = "robust"))
+neMod_mi = mitools::MIcombine(neMod5m)
+data.frame(
+  results = neMod_mi$coefficients,
+  se = sqrt(diag(neMod_mi$variance)),
+  z = neMod_mi$coefficients / sqrt(diag(neMod_mi$variance)),
+  p = 2 * pnorm(-abs(neMod_mi$coefficients / sqrt(diag(neMod_mi$variance))))
+)
+
+neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                         "week_admission1", "week_admission0:week_admission1")] 
+
+neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1"),
+                               names(neMod_mi$coefficients) %in% c("week_admission0", 
+                                                                   "week_admission1", "week_admission0:week_admission1")] 
+
+# THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
+out = data.frame(
+  effect = c("pnde", "tnde", "pnie", "tnie", "te"),
+  estimate = c(neMod5_coefs[[1]],
+               neMod5_coefs[[1]] + neMod5_coefs[[3]],
+               neMod5_coefs[[2]],
+               neMod5_coefs[[2]] + neMod5_coefs[[3]],
+               neMod5_coefs[[1]] + neMod5_coefs[[2]] + neMod5_coefs[[3]]),
+  se = c(sqrt(diag(neMod5_var)[[1]]),
+         sqrt(sum(diag( neMod5_var[c(1,3), c(1,3)])) + sum((2*  neMod5_var[c(1,3), c(1,3)] [upper.tri( neMod5_var[c(1,3), c(1,3)] )]))),
+         sqrt(sum(diag(neMod5_var)[[2]])),
+         sqrt(sum(diag( neMod5_var[c(2,3), c(2,3)])) + sum((2*  neMod5_var[c(2,3), c(2,3)] [upper.tri( neMod5_var[c(2,3), c(2,3)] )]))),
+         sqrt(sum(diag(neMod5_var)) + sum((2* neMod5_var[upper.tri(neMod5_var)]))))
+)
+out = out %>% 
+  mutate(
+    z = estimate / se,
+    p = 2 * pnorm(-abs(z)),
+    L95 = estimate - (1.96 * se),
+    U95 = estimate + (1.96 * se)
+  ) %>% 
+  mutate(across(c("estimate", "L95", "U95"), exp))
+
+out
+
+
+regmedint:::prop_med_yreg_logistic(-0.32637622,  -0.12089607)
+
+
+
 ```
