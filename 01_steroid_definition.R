@@ -67,7 +67,7 @@ steroid2_free_text = ccp_data %>%
   filter(!is.na(corticost2_cmtrt)) %>% 
   filter(!grepl(' cream| gel| ointme|topical', corticost2_cmtrt, ignore.case = T)) %>% 
   filter(!grepl('nose|nasal|spray|hale', corticost2_cmtrt, ignore.case = T)) %>% 
-  filter(!grepl('drops|opthalmo|lacrimal|eye|ear', corticost2_cmtrt, ignore.case = T)) %>% 
+  filter(!grepl('drops|opthalmo|lacrimal|eye|ear', corticost2_cmtrt, ignore.case = fT)) %>% 
   filter(!grepl('suppos|enema|foam', corticost2_cmtrt, ignore.case = T)) %>% 
   filter(!grepl('%', corticost2_cmtrt, ignore.case = T)) %>% 
   separate_rows(corticost2_cmtrt, sep = ',') %>% 

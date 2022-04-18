@@ -39,13 +39,13 @@ oneline    = read_rds(paste0(datadir, "oneline_", timestamp, "_full.rds"))
 oneline = oneline %>% 
   filter(hostdat < lubridate::ymd("20220401")) # Define < 2 weeks from timestamp, but we have nims data for. 
 
-nims = read_csv("~/covid_nims/nims/COCIN_NIMS__20220324.csv") %>% 
+nims = read_csv("/home/common/covid/nims/COCIN_NIMS__20220324.csv") %>% 
   rename_with(tolower)
 
-voc = read_csv("~/covid_nims/nims/COCIN_VOC_Lineage__20220126T162002Z.csv") %>% 
+voc = read_csv("/home/common/covid/nims/COCIN_VOC_Lineage__20220126T162002Z.csv") %>% 
   rename_with(tolower)
 
-sgtf = read_csv("~/covid_nims/nims/COCIN_SGTF__20220324.csv") %>% 
+sgtf = read_csv("/home/common/covid/nims/COCIN_SGTF__20220324.csv") %>% 
   rename_with(tolower)
 
 # Updated with 2022-04-08_1934: 
@@ -362,15 +362,22 @@ vac = oneline %>%
             vac_n_gr28 = first(vac_n_gr28)) %>% 
   mutate(vac_at_admission = if_else(is.na(vac_at_admission) & 
                                       hostdat <  ymd(20201208), "No", vac_at_admission) %>% 
-           fct_explicit_na(na_level = "Unknown"),
+           fct_explicit_na(na_level = "No"), # na_level = "Unknown"),
          vac_n_gr28 = if_else(is.na(vac_n_gr28)& 
                                 hostdat <  ymd(20201208), 0L, vac_n_gr28),
          vac_n_gr28_factor = factor(vac_n_gr28) %>% 
-           fct_explicit_na(na_level = "Unknown") %>% 
+           fct_explicit_na(na_level = "0") %>%  # na_level = "Unknown") %>% 
            fct_recode(
              "3+" = "3",
              "3+" = "4"
-           )) %>% 
+           ),
+         
+         
+               
+         # 18/04/2022 consider unknown to be not vaccinated. 
+         vac_n_gr28 = if_else(is.na(vac_n_gr28), 0L, vac_n_gr28)
+         
+         ) %>% 
   select(-hostdat)
 
 vac %>% count(vac_n_gr28_factor)
@@ -582,13 +589,14 @@ oneline = oneline %>%
 ```{r}
 # Isoweek
 isoweek_lookup = tibble(date = seq(ymd(20200101), ymd(20220601), by = 1)) %>% 
-  mutate(isoweek = lubridate::isoweek(date))
+  mutate(isoweek = lubridate::isoweek(date),
+         year = lubridate::year(date))
 
 isoweek_lookup = isoweek_lookup %>% 
   left_join(isoweek_lookup %>% 
-              group_by(isoweek) %>% 
+              group_by(isoweek, year) %>% 
               slice(1) %>% 
-              select(isoweek_date = date, isoweek)
+              select(isoweek_date = date, isoweek, year)
   )
 ```
 
@@ -761,6 +769,13 @@ oneline %>%
                      add_col_totals = TRUE, total_col = TRUE) %>% 
   mytable()
 ```
+
+```{r}
+out = oneline %>%
+  summary_factorlist("isoweek_date", c("vac_at_admission", "vac_n_gr28", "vac_n_gr28_factor"))
+```
+
+
 
 ```{r}
 antiviral = oneline %>% 
