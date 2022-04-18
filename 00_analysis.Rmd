@@ -52,7 +52,7 @@ sgtf = read_csv("/home/common/covid/nims/COCIN_SGTF__20220324.csv") %>%
 steroids = readRDS("steroids2.rds")
 trt_antivirals = readRDS("trt_antivirals2.rds")
 load(paste0(datadir, "helpers_", timestamp, "_full.rda"))
-source("/home/eharrison/cocin_ccp/02_functions.R")
+source("https://raw.githubusercontent.com/SurgicalInformatics/cocin_ccp/master/02_functions.R")
 ```
 
 ```{r eval=FALSE, include=FALSE}
