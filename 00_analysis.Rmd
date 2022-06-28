@@ -89,8 +89,8 @@ oneline = oneline %>%
   filter(hostdat > ymd(20200117)) %>% 
   filter(hostdat < Sys.Date()) %>% 
   filter(sex != "Not specified") %>% 
-  filter(country == "England") %>% # | 
-           # country == "Wales") %>% 
+  filter(country == "England") %>% # |
+           # country == "Wales") %>%
   filter(subjid %in% valid_chi_subjid)
 ```
 
@@ -297,7 +297,7 @@ oneline = oneline %>%
 
 ````{r}
 # Symptoms
-oneline = oneline %>% 
+tmp = oneline %>% 
   mutate(across(fever_ceoccur_v2:anosmia_ceoccur_v2,
                 ~ fct_recode(.,
                              "Yes" = "YES",
@@ -305,41 +305,43 @@ oneline = oneline %>%
                              "Unknown" = "Unknown"))
   ) %>% 
   mutate(
-    number_symptoms = select(., fever_ceoccur_v2:anosmia_ceoccur_v2) %>% 
+    symptoms_all_missing = across(fever_ceoccur_v2:anosmia_ceoccur_v2) %>%
+      {!is.na(.)} %>%
+      rowSums(),
+    symptoms_all_missing = if_else(symptoms_all_missing == 0, "Yes", "No"), 
+    
+    number_symptoms = across(fever_ceoccur_v2:anosmia_ceoccur_v2) %>% 
       {. == "Yes"} %>% 
       rowSums(na.rm = TRUE) %>% 
+      if_else(symptoms_all_missing == "Yes", NA_real_, .) %>% 
       ff_label("Number of symptoms"),
-    
-    # symptoms_all_missing = select(., fever_ceoccur_v2:anosmia_ceoccur_v2) %>% 
-    #   {!is.na(.)} %>% 
-    #   rowSums(na.rm = TRUE),
-    
+
     number_symptoms.factor = case_when(
-      # symptoms_all_missing == 0 ~ NA_character_,
       number_symptoms < 1 ~ "0",
       number_symptoms < 2 ~ "1", 
+      is.na(number_symptoms) ~ NA_character_,
       TRUE ~ "2+") %>% 
       factor() %>% 
       ff_label("Number of symptoms"),
     
-    # any_symptoms = case_when(
-    #   number_symptoms.factor == "0" ~ "No",
-    #   number_symptoms.factor == "1" ~ "Yes",
-    #   number_symptoms.factor == "2+" ~ "Yes",
-    #   asymptomatic == "Asymptomatic" ~ "No",
-    #   no_symptoms == "YES" ~ "No",
-    #   no_symptoms_v3 == "YES" ~ "No",
-    #   adm_no_symp == 1 ~ "No",
-    #   no_symptoms == "No" ~ "Yes",
-    #   no_symptoms_v3 == "No" ~ "Yes"
-    # ) %>% 
-    #   ff_label("Any symptoms"),
-    
     any_symptoms = case_when(
-      number_symptoms == 0 ~ "No",
-      number_symptoms > 0 ~ "Yes",
-    ) %>% 
-      ff_label("Any symptoms")
+      number_symptoms.factor == "0" ~ "No",
+      number_symptoms.factor == "1" ~ "Yes",
+      number_symptoms.factor == "2+" ~ "Yes",
+      asymptomatic == "Asymptomatic" ~ "No",
+      no_symptoms == "YES" ~ "No",
+      no_symptoms_v3 == "YES" ~ "No",
+      adm_no_symp == 1 ~ "No",
+      no_symptoms == "No" ~ "Yes",
+      no_symptoms_v3 == "No" ~ "Yes"
+    ) %>%
+      ff_label("Any symptoms"),
+    
+    # any_symptoms = case_when(
+    #   number_symptoms == 0 ~ "No",
+    #   number_symptoms > 0 ~ "Yes",
+    # ) %>% 
+    #   ff_label("Any symptoms")
   )
 ```
 
@@ -393,7 +395,8 @@ oneline = oneline %>%
 ```{r Impute, eval=FALSE, include=FALSE}
 ## Multiple imputation
 library(mice)
-imputation_variables = c("age", "age.factor", "sex", "imd_quintile",
+imputation_variables = c(#"age", 
+  "age.factor", "sex", "imd_quintile",
                         "vac_n_gr28_factor", 
                         "ethnicity_4levels",
                         "number_comorbid", 
@@ -608,8 +611,8 @@ oneline = oneline %>%
     hostdat < ymd(20200901) ~ "Jan 2020 - Aug 2020",
     hostdat < ymd(20210501) ~ "Sept 2020 - April 2021",
     hostdat < ymd(20211214) ~ "May 2021 - 13 Dec 2021",
-    TRUE ~ "14 Dec 2021 - 21 Jan 2022") %>% 
-      fct_relevel("Jan 2020 - Aug 2020", "Sept 2020 - April 2021",  "May 2021 - 13 Dec 2021", "14 Dec 2021 - 21 Jan 2022") %>% 
+    TRUE ~ "14 Dec 2021 - 26 Mar 2022") %>% 
+      fct_relevel("Jan 2020 - Aug 2020", "Sept 2020 - April 2021",  "May 2021 - 13 Dec 2021", "14 Dec 2021 - 26 Mar 2022") %>% 
       ff_label("Time period")
   )
 ```
@@ -1062,6 +1065,107 @@ t[[1]] %>% mytable()
 t[[2]] %>% mytable()
 ```
 
+
+```{r}
+# Model structure
+dependent = "Surv(time, status)"
+explanatory = c("epoch", "vac_n_gr28_factor", "age.factor", "sex", "imd_quintile",
+                        "ethnicity_4levels",
+                        "number_comorbid", 
+                        "number_symptoms")# , "isaric_phys")
+  explanatory = c("epoch_vac_age", "sex", "imd_quintile",
+                          "ethnicity_4levels",
+                          "number_comorbid")#                         "number_symptoms")# , "isaric_phys")
+tmp = oneline_reduced %>% 
+  mutate(
+    epoch_vac_age = fct_cross(epoch, vac_n_gr28_factor, age.factor, sep = "_")
+  ) %>% 
+  finalfit(dependent, explanatory, condense = FALSE)
+  
+
+tmp %>% 
+  separate(2, sep = "_", into = c("epoch", "vac_n_gr28_factor", "age.factor"))	%>% 
+  select(epoch, vac_n_gr28_factor, age.factor, HR = HR..multivariable., L95 = L95.y, U95 = U95.y) %>% 
+  drop_na(vac_n_gr28_factor) %>% 
+  mutate(HR = as.numeric(HR),
+         L95 = as.numeric(L95),
+         U95 = as.numeric(U95),
+         wave = factor(epoch) %>% 
+           fct_recode(
+             "1" = "Jan 2020 - Aug 2020", 
+             "2" = "Sept 2020 - April 2021", 
+             "3" = "May 2021 - 13 Dec 2021",
+             "Omicron" = "14 Dec 2021 - 26 Mar 2022"
+           ) %>% 
+           fct_relevel("1", "2", "3", "4")
+         ) %>% 
+  ggplot_lancet(aes(x = wave, y = HR, ymin = L95, ymax = U95, group = vac_n_gr28_factor, colour = vac_n_gr28_factor)) +
+  geom_pointrange() +
+  geom_line() +
+  scale_color_brewer("Vaccination", palette = "Set1") +
+  ylim(c(0, 22)) +
+  labs(x = "Wave", y = "Hazard ratio for death") +
+  facet_wrap(. ~ age.factor) +
+  ggtitle("Risk of death in hospitalised patients with COVID-19",
+          "Hazard ratio with 95% confidence interval, adjusted for sex, deprivation, ethnicity, comorbidity")
+  theme_bw()
+
+```
+
+```{r}
+master_complications_list = c("cryptogenic_ceterm", "ards_ceoccur", "pneumothorax_ceterm", 
+                              "pleuraleff_ceterm", "bactpneu_ceoccur",
+                              "meningitis_ceterm", "seizure_ceterm", "stroke_ceterm", "neuro_comp", 
+                              "heartfailure_ceterm", "endocarditis_aeterm", 
+                              "myocarditis_ceterm", "cardiomyopathy_ceterm", "arrhythmia_ceterm", "ischaemia_ceterm", 
+                              "cardiacarrest_ceterm",  
+                              "bacteraemia_ceterm", "coagulo_ceterm", "aneamia_ceterm",  "rhabdomyolsis_ceterm", 
+                              "renalinjury_ceterm", "gastro_ceterm", "pancreat_ceterm",
+                              "dvt_ceterm", "pulmthromb_ceterm", 
+                              "liverdysfunction_ceterm")
+oneline = oneline %>% 
+  mutate(comp = select(., master_complications_list) %>% 
+           {. == "YES"} %>% 
+           rowSums(na.rm = TRUE) %>% 
+           ff_label("Number of complications")
+  ) %>% 
+  mutate(comp_factor = case_when(
+    comp == 0 ~ "0",
+    comp == 1 ~ "1",
+    comp > 1 ~ "2+"
+  )
+  ) %>% 
+  mutate(comp_yn = ifelse(comp == 0, "No", "Yes")) %>%
+  mutate(comp_status = ifelse(comp == 0, 0, 1))
+```
+
+```{r}
+oneline %>% 
+  mutate(
+    wave = factor(epoch) %>% 
+      fct_recode(
+        "1" = "Jan 2020 - Aug 2020", 
+        "2" = "Sept 2020 - April 2021", 
+        "3" = "May 2021 - 13 Dec 2021",
+        "4" = "14 Dec 2021 - 26 Mar 2022"
+      ) %>% 
+      fct_relevel("1", "2", "3", "4")
+  ) %>% 
+  ggplot_lancet(aes(x = anydat.day1, y = comp_status, colour = vac_n_gr28_factor)) + 
+  geom_smooth(se = FALSE) + 
+  scale_x_date(date_breaks = "1 year", date_labels = "%b %Y") +
+  scale_y_continuous(label = scales::percent_format()) +
+  scale_color_brewer("Vaccination", palette = "Set1") +
+  labs(x = "Admission date", y = "Complication (%)") +
+  facet_grid(number_comorbid.factor ~ age.factor) + 
+  ggtitle("Complication rates over time stratified by age (horizontal), number comorbidities (vertical) and vaccination status") + 
+  theme(panel.spacing = unit(2, "lines"))
+  
+
+```
+
+
+
 ## Other outcomes
 
 ### O2
@@ -1201,11 +1305,85 @@ oneline %>%
 
 ```
 
+### Mediation analysis for survival
+
+```{r}
+set.seed(138087069)
+library(regmedint)
+library(tidyverse)
+library(recipes)
+
+
+oneline_reduced = oneline_reduced %>% 
+  mutate(
+    epoch = fct_relevel(epoch, "Sept 2020 - April 2021")
+  )
+
+dependent = "Surv(time, status)"
+oneline_reduced %>% 
+  coxphmulti(dependent, explanatory_full)
+
+oneline_reduced %>% 
+  recipe(status + time ~ epoch + age.factor + sex + imd_quintile + vac_n_gr28 + ethnicity_4levels + 
+           number_comorbid + number_symptoms) %>% 
+  step_dummy(all_nominal()) %>% 
+  prep() %>% 
+  juice() %>%
+  regmedint( yvar = "time",
+             avar = 
+               # "epoch_May.2021...13.Dec.2021", 
+             "epoch_X14.Dec.2021...26.Mar.2022",
+             mvar = "vac_n_gr28",
+             cvar = c(# "epoch_Sept.2020...April.2021", 
+               "epoch_Jan.2020...Aug.2020", 
+               # "epoch_X14.Dec.2021...26.Mar.2022", 
+               "epoch_May.2021...13.Dec.2021",
+               "age.factor_X50.69", "age.factor_X70.79",
+               "age.factor_X80.", 
+               "sex_Female", 
+               "imd_quintile_X2", "imd_quintile_X3", "imd_quintile_X4", 
+               "imd_quintile_X5...least.deprived", "imd_quintile_Unknown", 
+               "ethnicity_4levels_South.Asian", "ethnicity_4levels_East.Asian", 
+               "ethnicity_4levels_Black", "ethnicity_4levels_Other.Ethnic.Minority", 
+               "ethnicity_4levels_Unknown"),
+             eventvar = "status",
+             
+             ## Values at which effects are evaluated
+             a0 = 0,
+             a1 = 1,
+             m_cde = 0,
+             c_cond =c(0, 0,
+                       0, 0,
+                       0, 
+                       0, 
+                       0, 0, 0,
+                       0, 0, 
+                       0, 0, 
+                       0, 0, 
+                       0
+             ),
+             
+             ## Model types
+             mreg = "linear",
+             yreg = "survCox",
+             ## Additional specification
+             interaction = TRUE,
+             casecontrol = FALSE) %>% 
+  summary(exponentiate = TRUE) %>% 
+  coef() %>% 
+  knitr::kable(digits = 3)
+
+# 27.3% wave 4 vs wave 2
+# 19.5% wave 3 vs wave 2
+```
+
+
+
 
 
 ```{r eval=FALSE, include=FALSE}
 # Contrasts
-# "Jan 2020 - Aug 2020"       "Sept 2020 - April 2021"    "May 2021 - 13 Dec 2021"    "14 Dec 2021 - 21 Jan 2022"
+# "Jan 2020 - Aug 2020"       "Sept 2020 - April 2021"    "May 2021 - 13 Dec 2021"    "14 Dec 2021 - 26 Mar 2022"
 
 
 
@@ -1237,7 +1415,7 @@ expData = neImpute(any_oxygen ~ epoch + vac_n_gr28,
 neMod1 = neModel(any_oxygen ~ epoch0 + epoch1, family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod1)
-effdecomp = neEffdecomp(neMod1, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp = neEffdecomp(neMod1, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp)[["natural direct effect"]], 
                                    coef(effdecomp)[["natural indirect effect"]])
@@ -1256,7 +1434,7 @@ neMod2 = neModel(any_oxygen ~ epoch0 + epoch1 +
                  family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod2)
-effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp2)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
                                    coef(effdecomp2)[["natural indirect effect"]])
@@ -1279,7 +1457,7 @@ neMod3 = neModel(any_oxygen ~ epoch0 * epoch1 +
                  expData = expData, se = "robust")
 
 summary(neMod3)
-effdecomp3 = neEffdecomp(neMod3, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp3 = neEffdecomp(neMod3, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp3)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp3)[["pure direct effect"]], 
                                    coef(effdecomp3)[["total indirect effect"]])
@@ -1333,7 +1511,7 @@ neMod2 = neModel(any_icu ~ epoch0 + epoch1 +
                  family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod2)
-effdecomp2 = neEffdecomp(neMod2, xRef = c( "May 2021 - 13 Dec 2021" , "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod2, xRef = c( "May 2021 - 13 Dec 2021" , "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp2)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
                                    coef(effdecomp2)[["natural indirect effect"]])
@@ -1353,7 +1531,7 @@ neMod2 = neModel(any_icu ~ epoch0 + epoch1 +
                  family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod2)
-effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp2)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
                                    coef(effdecomp2)[["natural indirect effect"]])
@@ -1387,7 +1565,7 @@ neMod2 = neModel(any_invasive ~ epoch0 + epoch1 +
                  family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod2)
-effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp2)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
                                    coef(effdecomp2)[["natural indirect effect"]])
@@ -1407,7 +1585,7 @@ neMod2 = neModel(any_icu ~ epoch0 + epoch1 +
                  family = binomial("logit"), 
                  expData = expData, se = "robust")
 summary(neMod2)
-effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod2, xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 summary(effdecomp2)
 regmedint:::prop_med_yreg_logistic(coef(effdecomp2)[["natural direct effect"]], 
                                    coef(effdecomp2)[["natural indirect effect"]])
@@ -1431,7 +1609,7 @@ neMod1m = with(expData2, neModel(any_oxygen ~ epoch0 + epoch1,
                  family = binomial("logit"), se = "robust"))
 
 effdecomp1m =  neMod1m %>% 
-  map(~ neEffdecomp(., xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+  map(~ neEffdecomp(., xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
   )
 
 summary(effdecomp2)
@@ -1443,7 +1621,7 @@ list(summary(effdecomp2)$coefficients,
 
 
 neMod_mi = mitools::MIcombine(neMod1m)
-effdecomp2 = neEffdecomp(neMod_mi , xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 21 Jan 2022"))
+effdecomp2 = neEffdecomp(neMod_mi , xRef = c("Sept 2020 - April 2021", "14 Dec 2021 - 26 Mar 2022"))
 data.frame(
   results = neMod_mi$coefficients,
   se = sqrt(diag(neMod_mi$variance)),
@@ -1454,12 +1632,12 @@ data.frame(
 
 ```{r eval=FALSE, include=FALSE}
 neMod5_coefs = neMod_mi$coefficients[names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
-                                                                         "epoch114 Dec 2021 - 21 Jan 2022")] 
+                                                                         "epoch114 Dec 2021 - 26 Mar 2022")] 
 
 neMod5_var = neMod_mi$variance[names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
-                                                                   "epoch114 Dec 2021 - 21 Jan 2022"),
+                                                                   "epoch114 Dec 2021 - 26 Mar 2022"),
                                names(neMod_mi$coefficients) %in% c("epoch1May 2021 - 13 Dec 2021", 
-                                                                   "epoch114 Dec 2021 - 21 Jan 2022")] 
+                                                                   "epoch114 Dec 2021 - 26 Mar 2022")] 
 
 # THIS IS NEEDED FOR MI RESULTS. MAKE NEAT> 
 out = data.frame(
@@ -1758,3 +1936,31 @@ regmedint:::prop_med_yreg_logistic(-0.32637622,  -0.12089607)
 
 
 ```
+
+```{r}
+oneline %>% 
+  filter(any_oxygen == "Yes") %>% 
+  mutate(
+    any_steroid = as.numeric(any_steroid) - 1, 
+    anydat.month = anydat.day1 %>% format("%Y-%m") %>% paste0("-01") %>% ymd()
+  ) %>% 
+  filter(anydat.day1 > ymd(20200201)) %>% 
+  filter(anydat.day1 < ymd(20220301)) %>% 
+  group_by(anydat.month) %>% 
+  summarise(
+    n = n(),
+    any_steroid = sum(any_steroid, na.rm = TRUE),
+    any_steroid_prop = any_steroid / n,
+  ) %>% 
+  ggplot_lancet(aes(x = anydat.month, y = any_steroid_prop)) +
+  geom_line(colour = "darkblue") + 
+  geom_hline(yintercept = 0.85, linetype = 2, colour = "red") +
+  scale_y_continuous(label = scales::percent_format()) +
+  annotate("text", x = ymd(20200201), y = 0.82, label = "85%", colour = "red") +
+  labs(x = "Admission date", y = "Proportion of patients receiving any corticosteroid (%)") +
+  ggtitle("Proportion of hospitalised COVID-19 patients with an indication for steroid who received it")
+  
+
+
+```
+
